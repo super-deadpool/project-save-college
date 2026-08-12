@@ -36,6 +36,31 @@ export async function getLocationAncestry(
   };
 }
 
+/**
+ * Ancestor chains for every location in one query. Dedup scores proximity for a
+ * whole candidate set at once, and walking parents per candidate would be a
+ * query per level per candidate; the tree is a few dozen rows, so loading it
+ * whole is cheaper than being clever.
+ */
+export async function ancestryIndex(): Promise<Map<string, string[]>> {
+  const rows = await prisma.location.findMany({ select: { id: true, parentId: true } });
+  const parentOf = new Map(rows.map((r) => [r.id, r.parentId]));
+  const index = new Map<string, string[]>();
+
+  for (const row of rows) {
+    const chain: string[] = [];
+    let cursor: string | null = row.id;
+    // Guard against a cycle in seeded data rather than hanging the request.
+    while (cursor && chain.length < 16 && !chain.includes(cursor)) {
+      chain.push(cursor);
+      cursor = parentOf.get(cursor) ?? null;
+    }
+    index.set(row.id, chain);
+  }
+
+  return index;
+}
+
 /** Flat list for pickers, ordered so children follow their parent. */
 export async function listLocations() {
   const rows = await prisma.location.findMany({

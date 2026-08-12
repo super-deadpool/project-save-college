@@ -39,6 +39,9 @@ npm test                    # vitest — the layer gates
 npx tsx scripts/layer3-compare.ts     # rules vs LLM on the same sentences, same engine
 ./scripts/layer4-gate.sh              # priority + why + department, shown vs stored (needs npm run dev)
 GROQ_API_KEY= npx tsx scripts/layer4-nokey.ts   # the no-key run, through the service layer
+
+GROQ_API_KEY= npx tsx scripts/layer5-nokey.ts   # the Layer 5 gate — isolates its own history, asserts exact counts
+./scripts/layer5-gate.sh              # §16 from four real logins + incident RBAC (needs npm run dev)
 ```
 
 Ports: app **3000** · Postgres **5433** (not 5432 — avoids clashing with a local instance) · Adminer **8080**
@@ -76,7 +79,14 @@ src/lib/
   drafts/service.ts          # draft persistence + DraftView for the chat UI
   complaints/assess.ts       # the ONE place classify + priority + routing run
   complaints/create.ts       # persists an assessment + code + CREATED event
-  dedup/      signature → candidates → score → link/create
+  dedup/
+    score.ts                 # pure: 0.55 signature · 0.15 location · 0.15 text · 0.15 time
+    candidates.ts            # the SQL half — pg_trgm similarity over open incidents
+  incidents/
+    priority.ts                # pure: max(members) + scale escalation
+    message.ts                 # pure: §36 student-facing incident message
+    service.ts                 # attach / link / merge / recount
+    view.ts                    # one loader for the page and the API
   lifecycle/  transition() + event timeline
   sla/        due dates, breach detection, escalation ladder
   analytics/  raw SQL aggregations, recurring detection, health score
@@ -105,7 +115,11 @@ tests/                       # mirrors src/lib paths
 - **Never use scope/impact/duration hints as category evidence.** `extractCategory` skips options on `signal` slots: "my wing" and "since yesterday" describe circumstances every category shares.
 - **A band is never returned or displayed without its reasons** (§14). Students see the sentences; staff also see points, details, score, routing confidence and the signature. Routing *uncertainty* is never student-facing (§39) — an unrouted complaint reads "to be assigned by the campus office".
 - **Status changes go through `lifecycle/transition()` only.** Never a bare `prisma.complaint.update({ data: { status } })` — it would skip the transition table and the event timeline.
-- **Every complaint has exactly one incident.** Size-1 incidents are hidden in the UI. No nullable-incident branching anywhere. (Incidents land in Layer 5.)
+- **Every complaint has exactly one incident.** Size-1 incidents are hidden in the UI (`isSharedIncident()`). No nullable-incident branching anywhere. A merge that empties an incident deletes it — an incident with no members is a leftover, not a record.
+- **`affectedCount` is distinct *reporters*, not complaints.** §18 says "47 students have reported this issue"; one student filing twice is one affected student. Always recompute it with `recountIncident()` rather than incrementing.
+- **Dedup escalates the incident, never the member.** Linking must not touch a complaint's stored band — the student agreed to that band (§12). Scale (5 → +1, 20 → +2) moves `Incident.priority` only.
+- **`dedup/score.ts` stays pure; `dedup/candidates.ts` owns the SQL.** The scorer takes `textSimilarity` as a number so every weight and threshold is a unit test. Candidates are drawn by category + window + open incident — **never** by signature equality, because an `UNKNOWN` scope bucket has to act as a wildcard.
+- **A gate that pins a dedup band must pick a sentence the *rules* extractor reads.** "keeps disconnecting" has no keyword hint, so that case only lands on the right subcategory with an API key — which makes the band it asserts accidental. Check the sentence against `extractFromText` before relying on it.
 - **`pg_trgm` similarity requires `$queryRaw`** — Prisma has no native trigram support.
 - **The domain layer stays pure.** `engine/`, `dedup/`, `sla/`, `analytics/` (except its SQL module) must not import Prisma or call `fetch`. Data in → decisions out. This is the whole reason the layer gates can be unit tests.
 - **Do not start a layer until the previous layer's gate passes.** Gates are in `plan.MD` §7.
@@ -129,8 +143,8 @@ Read this first, update it last. Mirrors `plan.MD`.
 | 2 | Conversational engine (deterministic) | ✅ Gate passed |
 | 3 | LLM extraction adapter (Groq) | ✅ Gate passed |
 | 4 | Classification, priority, routing, explainability | ✅ Gate passed |
-| 5 | Dedup & incidents | ⬜ Next |
-| 6 | Lifecycle & staff workflow | ⬜ |
+| 5 | Dedup & incidents | ✅ Gate passed |
+| 6 | Lifecycle & staff workflow | ⬜ Next |
 | 7 | Attachments & anonymous reporting | ⬜ |
 | 8 | SLA & escalation | ⬜ |
 | 9 | Resolution confirmation, reopen, feedback | ⬜ |
@@ -138,7 +152,7 @@ Read this first, update it last. Mirrors `plan.MD`.
 | 11 | Search & discovery | ⬜ |
 | 12 | AI insight narratives (notifications deferred) | ⬜ |
 
-**Carried into later layers:** `incidentId` stays null until Layer 5. Dedup should treat an `UNKNOWN` scope bucket as a wildcard in the candidate query rather than requiring exact signature equality — a complaint whose scope was never answered will not signature-match one where it was.
+**Carried into later layers:** incident status is fixed at `OPEN` — propagating it from member complaints is Layer 6's job, and `lib/incidents/view.ts` already derives what that will need. The §36 message text already branches on `RESOLVED`/`CLOSED`.
 
 - auto compact at 60% capacity and after 3 times of auto compacting in a row . make the summary of the session to give to new session
 - Do not build until you have 95% confidence of what you are building. To get the confidence ask me for questions.

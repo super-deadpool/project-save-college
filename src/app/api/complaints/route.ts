@@ -52,7 +52,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Missing required answers', missing }, { status: 400 });
   }
 
-  const { complaint, routing, assessment } = await createComplaint({
+  const { complaint, routing, assessment, incident } = await createComplaint({
     reporterId: session.sub,
     categoryKey: schema.key,
     locationId: parsed.data.locationId ?? null,
@@ -74,6 +74,17 @@ export async function POST(request: Request) {
         needsTriage: complaint.needsTriage,
       },
       routing,
+      // §16–§18 — which incident absorbed this, and on what evidence.
+      incident: {
+        id: incident.incidentId,
+        code: incident.incidentCode,
+        title: incident.incidentTitle,
+        affectedCount: incident.affectedCount,
+        isNew: incident.isNew,
+        verdict: incident.verdict,
+        score: incident.score,
+        suggestion: incident.suggestion,
+      },
       // §13/§14 — the caller sees the classification and the reasons for the
       // band, not just the band.
       classification: assessment.classification,

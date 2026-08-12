@@ -6,6 +6,7 @@ import { evaluateCondition } from '@/lib/engine/condition';
 import { hasSafetyShortCircuit } from '@/lib/engine/completeness';
 import { createComplaint } from '@/lib/complaints/create';
 import { studentFacingAssessment } from '@/lib/complaints/assess';
+import { incidentMessage, isSharedIncident } from '@/lib/incidents/message';
 import { loadDraft, locationIdOf, toState } from '@/lib/drafts/service';
 import type { SlotValues } from '@/lib/engine/types';
 
@@ -51,7 +52,7 @@ export async function POST(_request: Request, { params }: RouteContext<'/api/dra
 
   // The rubric reads the same short-circuit signal, so live danger still submits
   // as CRITICAL — via one code path rather than a special case here (§14).
-  const { complaint, assessment } = await createComplaint({
+  const { complaint, assessment, incident } = await createComplaint({
     reporterId: session.sub,
     categoryKey: schema.key,
     locationId: locationIdOf(slots),
@@ -77,6 +78,26 @@ export async function POST(_request: Request, { params }: RouteContext<'/api/dra
         needsTriage: complaint.needsTriage,
       },
       assessment: studentFacingAssessment(assessment),
+      // §36 — when the issue is already known, the acknowledgement says so.
+      // `message` is null for a solitary report: a size-1 incident is invisible
+      // to the student, who is simply told their complaint was received.
+      incident: {
+        id: incident.incidentId,
+        code: incident.incidentCode,
+        title: incident.incidentTitle,
+        affectedCount: incident.affectedCount,
+        isNew: incident.isNew,
+        message: isSharedIncident(incident.affectedCount)
+          ? incidentMessage({
+              code: incident.incidentCode,
+              title: incident.incidentTitle,
+              status: incident.incidentStatus,
+              priority: complaint.priority,
+              affectedCount: incident.affectedCount,
+              departmentName: complaint.department?.name ?? null,
+            })
+          : null,
+      },
       safetyShortCircuit: shortCircuit,
     },
     { status: 201 },

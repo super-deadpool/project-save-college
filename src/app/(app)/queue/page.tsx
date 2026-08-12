@@ -15,7 +15,7 @@ export default async function QueuePage() {
     where,
     orderBy: { createdAt: 'desc' },
     take: 200,
-    include: { department: true, location: true, reporter: true },
+    include: { department: true, location: true, reporter: true, incident: true },
   });
 
   // Band first, then the rubric score inside a band, then oldest-first so nothing
@@ -48,6 +48,13 @@ export default async function QueuePage() {
                   {c.needsTriage && (
                     <span className="rounded-full bg-yellow-100 px-2 py-0.5 text-xs text-yellow-800">
                       Needs triage
+                    </span>
+                  )}
+                  {/* Scale is a triage signal (§18): one report and forty look
+                      identical in a queue unless the count is on the row. */}
+                  {c.incident && c.incident.affectedCount > 1 && (
+                    <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs text-blue-800">
+                      {c.incident.code} · {c.incident.affectedCount} affected
                     </span>
                   )}
                 </div>

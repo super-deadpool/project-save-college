@@ -173,6 +173,31 @@ export function computeSignature(parts: {
   ].join('|');
 }
 
+/**
+ * The inverse of `computeSignature`. Layer 5 reads the scope bucket back off a
+ * stored complaint row — the bucket is not a column of its own, and a readable
+ * composite is exactly what makes that possible.
+ */
+export function parseSignature(signature: string | null | undefined): {
+  categoryKey: string | null;
+  subcategoryKey: string | null;
+  locationId: string | null;
+  scopeBucket: ScopeBucket;
+} {
+  const parts = signature?.split('|') ?? [];
+  if (parts.length !== 4) {
+    return { categoryKey: null, subcategoryKey: null, locationId: null, scopeBucket: 'UNKNOWN' };
+  }
+  const bucket = parts[3];
+  return {
+    categoryKey: parts[0],
+    subcategoryKey: parts[1] === 'NONE' ? null : parts[1],
+    locationId: parts[2] === 'NOLOC' ? null : parts[2],
+    scopeBucket:
+      bucket === 'ISOLATED' || bucket === 'WIDESPREAD' ? (bucket as ScopeBucket) : 'UNKNOWN',
+  };
+}
+
 function subcategoryOf(schema: CategorySchema, slots: SlotValues) {
   const slot = schema.slots.find((s) => s.key === schema.subcategorySlot);
   const entry = slot ? slots[slot.key] : undefined;

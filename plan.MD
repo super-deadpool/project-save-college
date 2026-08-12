@@ -332,6 +332,29 @@ Signature computation, candidate query (open incidents, same category/location f
 
 **Gate:** submit the four spec §16 phrasings from four student accounts → one incident, `affectedCount = 4`, and students #2–4 see the incident message rather than a generic ack.
 
+**Gate result (passed).** 298 vitest tests, `GROQ_API_KEY= npx tsx scripts/layer5-nokey.ts` (the gate proper — it controls its own history, so it asserts the exact numbers), and `scripts/layer5-gate.sh` over the API with four real logins. The four §16 phrasings converge on one incident at 1.00 / 0.89 / 0.81, the affected count reaches 4, and students 2–4 are handed the §36 message while student 1 gets a plain acknowledgement.
+
+**As built.** Four decisions shaped this layer:
+
+- **Attributes decide, text only breaks ties.** The four §16 sentences share almost no words — trigram similarity between them runs 0.10–0.20 — and they still auto-link, because 0.55 of the score is the classification and only 0.15 is the wording. This is the whole reason no embeddings are needed, and the unit tests pin it by scoring the four cases at deliberately *low* text similarity.
+- **`affectedCount` counts distinct reporters, not complaints.** §18 says "47 students have reported this issue", and one student filing twice is one affected student. The API gate exercises this for real: the incident it inspects holds nine complaints from four students and reports 4.
+- **Scale escalates the incident, never the complaint.** 5 affected → +1 band, 20 → +2, applied to the incident only. Re-banding a stored complaint behind the student's back is exactly what Layer 4 was built to prevent, so members keep the band they agreed to (§12) and the gate asserts linking never changes it.
+- **The middle band is a question put to a person.** 0.45–0.70 writes an internal `DUPLICATE_SUGGESTED` event and gives the complaint its own incident; staff see a "Merge into INC-xxx" panel backed by `POST /api/incidents/[id]/merge`, which runs the *same* `linkToIncident` as the automatic path. Confirming a merge empties the old incident, which is then collected — every complaint has exactly one incident, so an emptied one is a leftover, not a record.
+
+**Deviations from the design above, all deliberate:**
+
+| Design | As built | Why |
+|---|---|---|
+| `signatureMatch` on the whole signature | graded on category + subcategory + scope bucket; location scored separately | The signature includes `locationId`, and `locationProximity` already weighs location. Counting it twice would punish a same-building/different-room pair across 0.70 of the score instead of 0.15. Identical signatures still score 1.0. |
+| exact signature equality to find candidates | candidates drawn by category + window + open incident | Layer 4's carried note: an `UNKNOWN` scope bucket must be a wildcard. §16's fourth student never says how many people are affected and has no building — they still link at 0.81. |
+| location proximity by tree distance | by depth of the deepest shared ancestor | Written as hop-distance first, and a test caught it: two *buildings* are one hop apart through the campus root, which scored them 0.7 "same floor". Sharing the root is the weakest relationship, not the strongest. Containment then falls out for free — a room and its own floor share that floor. |
+| single global dedup window | per-category `dedupWindowHours`, already declared by all 13 schemas | A burst pipe twelve hours apart is two floods; a broken chair three days apart is one chair. |
+| `Incident.departmentId` | derived from members | Members share a category and location family, so they route identically (§15). Storing it would be a second copy of a routing decision that could go stale. |
+
+**One thing worth recording for later layers:** the near-miss case in the gate originally used "the wifi keeps disconnecting", which lands on the right subcategory *only with an API key* — no keyword hint matches "disconnecting". The case now uses wording the rules extractor reads on its own, so the band it asserts is provable rather than incidental. Any future gate that pins a dedup band has to pick its sentence the same way.
+
+**Carried into Layer 6:** incident status is set to `OPEN` and never moves — propagation from member complaints is Layer 6's job, and `loadIncident` already derives everything the propagation will need. `IncidentStatus.RESOLVED/CLOSED` already changes the §36 message text.
+
 ### Layer 6 — Lifecycle & staff workflow
 State machine with an explicit transition table enforced in one `transition()` function, every transition writing a `ComplaintEvent`. States: SUBMITTED → ANALYZING → ASSIGNED → ACKNOWLEDGED → IN_PROGRESS → RESOLVED → CLOSED, plus WAITING_FOR_STUDENT, REOPENED, REJECTED, DUPLICATE. Staff queue sorted Critical → High → SLA-at-risk → Normal (§21); accept/assign/update-status/add-progress/request-info; student tracking page with the stepper + timestamped feed (§20). Incident-level status propagates to member complaints.
 
@@ -388,8 +411,8 @@ Update this table as each gate passes. Mirrored in `CLAUDE.md` §7.
 | 2 | Conversational engine (deterministic) | ✅ Gate passed |
 | 3 | LLM extraction adapter (Groq) | ✅ Gate passed |
 | 4 | Classification, priority, routing, explainability | ✅ Gate passed |
-| 5 | Dedup & incidents | ⬜ Next |
-| 6 | Lifecycle & staff workflow | ⬜ |
+| 5 | Dedup & incidents | ✅ Gate passed |
+| 6 | Lifecycle & staff workflow | ⬜ Next |
 | 7 | Attachments & anonymous reporting | ⬜ |
 | 8 | SLA & escalation | ⬜ |
 | 9 | Resolution confirmation, reopen, feedback | ⬜ |

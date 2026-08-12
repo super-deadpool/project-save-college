@@ -4,6 +4,7 @@ import { buildDescription } from '@/lib/engine/summary';
 import { getLlmProvider } from '@/lib/llm';
 import { generateTitle } from '@/lib/llm/title';
 import { getLocationAncestry } from '@/lib/locations';
+import { attachToIncident, type IncidentAttachment } from '@/lib/incidents/service';
 import { assessComplaint, type Assessment } from './assess';
 import type { SlotValues } from '@/lib/engine/types';
 
@@ -92,5 +93,20 @@ export async function createComplaint(input: CreateComplaintInput) {
     include: { department: true, location: true },
   });
 
-  return { complaint, routing, assessment };
+  // Every complaint belongs to exactly one incident (plan.MD §6), so this runs
+  // unconditionally — it either joins an open incident or opens a new one. It is
+  // deliberately *after* the complaint row exists: dedup scores a persisted
+  // complaint against persisted ones, using the same trigram query for both.
+  const incident: IncidentAttachment = await attachToIncident({
+    complaintId: complaint.id,
+    complaintCode: complaint.code,
+    reporterId: input.reporterId,
+    title: complaint.title,
+    description: complaint.description,
+    createdAt: complaint.createdAt,
+    schema,
+    classification,
+  });
+
+  return { complaint, routing, assessment, incident };
 }
