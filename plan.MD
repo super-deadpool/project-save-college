@@ -360,6 +360,26 @@ State machine with an explicit transition table enforced in one `transition()` f
 
 **Gate:** drive a complaint through the full happy path as staff; the student page shows every step with timestamps; an illegal transition is rejected by the API.
 
+**Gate result (passed).** 346 vitest tests, `GROQ_API_KEY= npx tsx scripts/layer6-nokey.ts` (the gate proper — it also covers the incident-wide action), and `scripts/layer6-gate.sh` over the API with four logins. One complaint runs submitted → analyzed → assigned → accepted → in progress → question → answer → resolved → closed; every reached step on the student's tracker carries a timestamp taken from its own event; `respondedAt` / `resolvedAt` / `closedAt` are all stamped; and four refusals are exercised — an illegal move (409 with the legal alternatives), a student in the staff workflow (403), another department (403), and a rejection with no reason (409).
+
+**As built.** Four decisions shaped this layer:
+
+- **One table, one writer.** `lifecycle/machine.ts` holds the transition table and nothing else — no Prisma, no clock — and `transition()` is the only function that writes `Complaint.status`. Everything else (the submission path, the four route handlers, the incident-wide action) asks it. That is what makes the timeline a record rather than a log: a status the feed cannot explain is unreachable.
+- **Submission records the steps that already happened.** Analysis and routing run *before* the complaint row exists, so leaving it at SUBMITTED would show the student an empty tracker for finished work. `createComplaint` walks SUBMITTED → ANALYZING → ASSIGNED through `transition()`, giving §20's "10:20 submitted / 10:21 assigned to IT" for free. A complaint routing could not place stops at ANALYZING and waits for a human (§15).
+- **Both directions between a complaint and its incident.** Up: an incident's status is recomputed from its members on every transition — active as soon as **one** member is being worked on, resolved only when **every** one is, because thirty-nine of forty students still have no Wi-Fi otherwise. Down: `POST /api/incidents/[id]/status` applies the move to every member, each through `transition()`, and reports the ones that could not go rather than forcing them.
+- **The queue is a pure function.** `sortQueue()` implements §21's Critical → High → SLA-approaching → Normal (with finished work last) and reads the Layer 8 due dates as nullable. Until Layer 8 stamps them, the at-risk bucket never fires and the order degrades to band → score → age; the unit tests pin the bucket with synthetic dates so it is already proven when the dates arrive.
+
+**Deviations from the design above, all deliberate:**
+
+| Design | As built | Why |
+|---|---|---|
+| the §19 ladder as drawn | ASSIGNED → IN_PROGRESS is **not** a legal edge | `respondedAt` is stamped on ACKNOWLEDGED and Layer 8's response SLA is measured against it. The shortcut would leave a worked-on complaint with no response time at all. The progress-update route acknowledges first rather than skipping. |
+| incident action applies the status | it walks each member up the ladder to it | Members sit at different rungs. "Resolve all" on forty untouched complaints would otherwise resolve none. `pathTo()` finds the shortest legal route per member, so every rung is still a real transition with its own event — and `respondedAt` is stamped on the way past. Intermediate steps may not be ones that need a reason: nobody is carried *through* "rejected" en route somewhere else. |
+| statuses named by their enum in the feed | each rule carries a `narration` | §20's feed reads "Investigation started", not "IN_PROGRESS", and "Assigned to IT Services" rather than "Assigned" — the department is the informative half. |
+| — | `scripts/layer6-backfill.ts` | 66 complaints from Layers 1–5 sat at SUBMITTED, a state only the system can leave, so staff opening one were offered nothing. The backfill walks them through the same `transition()` a new complaint takes. |
+
+**Carried into Layer 7–9:** the transition table already permits the two moves Layer 9 needs (`RESOLVED → CLOSED` and `RESOLVED → REOPENED`, both by the student, the reopen requiring a reason), so that layer adds screens and a `Feedback` row rather than new rules. `reopenCount` is already incremented and `resolvedAt`/`closedAt` cleared on reopen.
+
 ### Layer 7 — Attachments & anonymous reporting
 `StorageAdapter` interface + `LocalDiskStorage` (`./uploads`, size/mime caps, served through an auth-checked route handler). Student attachments during the conversation; staff resolution evidence; **voice input via the browser's Web Speech API** (free, no server transcription — transcript feeds the same text pipeline). Anonymous flag hides student identity from department-facing views while preserving it for admin audit.
 
@@ -412,8 +432,8 @@ Update this table as each gate passes. Mirrored in `CLAUDE.md` §7.
 | 3 | LLM extraction adapter (Groq) | ✅ Gate passed |
 | 4 | Classification, priority, routing, explainability | ✅ Gate passed |
 | 5 | Dedup & incidents | ✅ Gate passed |
-| 6 | Lifecycle & staff workflow | ⬜ Next |
-| 7 | Attachments & anonymous reporting | ⬜ |
+| 6 | Lifecycle & staff workflow | ✅ Gate passed |
+| 7 | Attachments & anonymous reporting | ⬜ Next |
 | 8 | SLA & escalation | ⬜ |
 | 9 | Resolution confirmation, reopen, feedback | ⬜ |
 | 10 | Analytics, dashboards, insights | ⬜ |

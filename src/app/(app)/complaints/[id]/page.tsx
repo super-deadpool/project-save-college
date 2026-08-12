@@ -6,7 +6,12 @@ import { PriorityBadge, StatusBadge } from '@/components/badges';
 import { getCategory } from '@/lib/engine/schemas';
 import { summaryLines } from '@/lib/engine/summary';
 import { incidentMessage, isSharedIncident } from '@/lib/incidents/message';
+import { Stepper } from '@/components/stepper';
+import { nextStatuses } from '@/lib/lifecycle/machine';
+import { stepperFor } from '@/lib/lifecycle/stepper';
+import { statusStamps, timelineEntry, visibleTo } from '@/lib/lifecycle/timeline';
 import { MergeSuggestion } from './merge-suggestion';
+import { StaffActions, StudentReply } from './lifecycle-actions';
 import type { PriorityReason } from '@/lib/engine/priority';
 import type { SlotValues } from '@/lib/engine/types';
 
@@ -20,8 +25,11 @@ export default async function ComplaintDetailPage({ params }: PageProps<'/compla
       department: true,
       location: true,
       reporter: true,
+      assignee: true,
       incident: true,
-      events: { orderBy: { createdAt: 'asc' }, include: { actor: true } },
+      // cuid v1 sorts by creation time, which keeps two events written in the
+      // same millisecond — submission writes three — in the order they happened.
+      events: { orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], include: { actor: true } },
     },
   });
   if (!complaint) notFound();
@@ -70,6 +78,56 @@ export default async function ComplaintDetailPage({ params }: PageProps<'/compla
     suggestionMeta.suggestedIncidentId != null &&
     suggestionMeta.suggestedIncidentId !== complaint.incidentId;
 
+  // §20 — the lifecycle, told twice: the stepper for "where is it", the feed for
+  // "what happened". Both read the same STATUS_CHANGED events, so they cannot
+  // disagree with each other or with the status badge above.
+  const entries = complaint.events.map((e) =>
+    timelineEntry({
+      id: e.id,
+      type: e.type,
+      message: e.message,
+      meta: e.meta,
+      isInternal: e.isInternal,
+      createdAt: e.createdAt,
+      actorName: e.actor?.name ?? null,
+    }),
+  );
+  const steps = stepperFor({
+    status: complaint.status,
+    stamps: statusStamps(
+      complaint.events.map((e) => ({
+        id: e.id,
+        type: e.type,
+        message: e.message,
+        meta: e.meta,
+        isInternal: e.isInternal,
+        createdAt: e.createdAt,
+        actorName: null,
+      })),
+    ),
+    departmentName: complaint.department?.name ?? null,
+    submittedAt: complaint.createdAt,
+  });
+
+  // The buttons a staff member gets are whatever the transition table allows
+  // them from here. Two are pulled out because they are more than a status
+  // change: accepting also claims ownership, and asking for information needs
+  // the question itself.
+  const staffActions = !isStudentView
+    ? nextStatuses(complaint.status, session.role)
+        .filter((r) => r.to !== 'ACKNOWLEDGED' && r.to !== 'WAITING_FOR_STUDENT')
+        .map((r) => ({ status: r.to, label: r.label, requiresNote: Boolean(r.requiresNote) }))
+    : [];
+  const canAccept = !isStudentView && nextStatuses(complaint.status, session.role).some((r) => r.to === 'ACKNOWLEDGED');
+  const canRequestInfo =
+    !isStudentView && nextStatuses(complaint.status, session.role).some((r) => r.to === 'WAITING_FOR_STUDENT');
+
+  // What the student is being asked, so the reply box repeats the question.
+  const pendingQuestion =
+    complaint.status === 'WAITING_FOR_STUDENT'
+      ? ([...complaint.events].reverse().find((e) => e.type === 'INFO_REQUESTED')?.message ?? null)
+      : null;
+
   const reasons = complaint.priorityReasons as unknown as PriorityReason[];
   // §14 — the band is never shown without its reasons. Students get the
   // sentences; staff also get the points behind each one.
@@ -96,8 +154,31 @@ export default async function ComplaintDetailPage({ params }: PageProps<'/compla
             (isStudentView ? 'To be assigned by the campus office' : 'Unrouted — needs triage')}
           {complaint.location ? ` · ${complaint.location.name}` : ''} ·{' '}
           {complaint.createdAt.toLocaleString('en-IN')}
+          {complaint.assignee && ` · with ${complaint.assignee.name}`}
         </p>
       </div>
+
+      {/* §20 — the student's first question is "where has my complaint got to",
+          so the tracker comes before every explanation of it. */}
+      <section className="rounded-lg border border-line bg-surface p-5">
+        <h2 className="text-sm font-medium">Progress</h2>
+        <div className="mt-4">
+          <Stepper steps={steps} />
+        </div>
+      </section>
+
+      {complaint.status === 'WAITING_FOR_STUDENT' && complaint.reporterId === session.sub && (
+        <StudentReply complaintId={complaint.id} question={pendingQuestion} />
+      )}
+
+      {!isStudentView && (
+        <StaffActions
+          complaintId={complaint.id}
+          canAccept={canAccept}
+          canRequestInfo={canRequestInfo}
+          actions={staffActions}
+        />
+      )}
 
       {banner && incident && (
         <section className="rounded-lg border border-blue-200 bg-blue-50 p-5">
@@ -174,15 +255,24 @@ export default async function ComplaintDetailPage({ params }: PageProps<'/compla
       )}
 
       <section className="rounded-lg border border-line bg-surface p-5">
-        <h2 className="text-sm font-medium">Timeline</h2>
+        <h2 className="text-sm font-medium">Updates</h2>
         <ol className="mt-3 space-y-3">
-          {complaint.events
-            .filter((e) => !e.isInternal || session.role !== 'STUDENT')
-            .map((e) => (
-              <li key={e.id} className="text-sm">
-                <span className="text-muted">{e.createdAt.toLocaleString('en-IN')}</span>{' '}
-                <span className="font-medium">{e.type.replace(/_/g, ' ').toLowerCase()}</span>
-                {e.message && <p className="text-muted">{e.message}</p>}
+          {entries
+            .filter((entry) => visibleTo(entry, session.role))
+            .map((entry) => (
+              <li key={entry.id} className="grid gap-1 sm:grid-cols-[10rem_1fr]">
+                <span className="text-xs text-muted">{entry.at.toLocaleString('en-IN')}</span>
+                <div className="text-sm">
+                  <p className="font-medium">
+                    {entry.headline}
+                    {entry.isInternal && (
+                      <span className="ml-2 rounded-full bg-slate-100 px-2 py-0.5 text-xs font-normal text-slate-600">
+                        internal
+                      </span>
+                    )}
+                  </p>
+                  {entry.detail && <p className="text-muted">{entry.detail}</p>}
+                </div>
               </li>
             ))}
         </ol>

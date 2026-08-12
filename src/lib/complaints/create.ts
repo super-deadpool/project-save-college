@@ -5,6 +5,7 @@ import { getLlmProvider } from '@/lib/llm';
 import { generateTitle } from '@/lib/llm/title';
 import { getLocationAncestry } from '@/lib/locations';
 import { attachToIncident, type IncidentAttachment } from '@/lib/incidents/service';
+import { transition } from '@/lib/lifecycle/transition';
 import { assessComplaint, type Assessment } from './assess';
 import type { SlotValues } from '@/lib/engine/types';
 
@@ -108,5 +109,36 @@ export async function createComplaint(input: CreateComplaintInput) {
     classification,
   });
 
-  return { complaint, routing, assessment, incident };
+  const status = await advanceOnSubmission(complaint.id, complaint.department);
+
+  return { complaint: { ...complaint, status }, routing, assessment, incident };
+}
+
+/**
+ * §19's first two steps, taken immediately (Layer 6).
+ *
+ * Analysis and routing have *already happened* by the time the row exists — the
+ * assessment above is the analysis. Leaving the complaint at SUBMITTED would
+ * make the student's tracker (§20) show nothing for work that is done, so the
+ * two moves are recorded as what they are, through `transition()`, each with its
+ * own timestamped event.
+ *
+ * It stops at ANALYZING when routing found no department: §15's low-confidence
+ * case is a human decision, and pretending it was assigned would hide it.
+ */
+async function advanceOnSubmission(complaintId: string, department: { name: string } | null) {
+  const system = { id: null, role: 'SYSTEM' as const };
+
+  const analyzed = await transition({ complaintId, to: 'ANALYZING', actor: system });
+  if (!analyzed.ok) return 'SUBMITTED' as const;
+  if (!department) return 'ANALYZING' as const;
+
+  const assigned = await transition({
+    complaintId,
+    to: 'ASSIGNED',
+    actor: system,
+    // §20's feed says "Assigned to IT Department", not "Assigned".
+    meta: { departmentName: department.name },
+  });
+  return assigned.ok ? ('ASSIGNED' as const) : ('ANALYZING' as const);
 }

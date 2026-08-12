@@ -2,8 +2,7 @@ import Link from 'next/link';
 import { requireRole } from '@/lib/auth/session';
 import { prisma } from '@/lib/db';
 import { PriorityBadge, StatusBadge } from '@/components/badges';
-
-const PRIORITY_ORDER = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 } as const;
+import { queueBucket, slaRisk, sortQueue } from '@/lib/queue/rank';
 
 export default async function QueuePage() {
   const session = await requireRole('STAFF', 'DEPT_MANAGER', 'ADMIN');
@@ -15,24 +14,23 @@ export default async function QueuePage() {
     where,
     orderBy: { createdAt: 'desc' },
     take: 200,
-    include: { department: true, location: true, reporter: true, incident: true },
+    include: { department: true, location: true, reporter: true, assignee: true, incident: true },
   });
 
-  // Band first, then the rubric score inside a band, then oldest-first so nothing
-  // starves. §21's full SLA-aware ordering lands with the lifecycle work.
-  const sorted = [...complaints].sort(
-    (a, b) =>
-      PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority] ||
-      b.priorityScore - a.priorityScore ||
-      a.createdAt.getTime() - b.createdAt.getTime(),
-  );
+  // §21: Critical → High → SLA approaching → Normal, finished work last. The
+  // ordering itself is a pure function so it can be pinned by a unit test.
+  const now = new Date();
+  const sorted = sortQueue(complaints, now);
+  const open = sorted.filter((c) => queueBucket(c, now) !== 'DONE').length;
 
   return (
     <div>
       <h1 className="text-xl font-semibold">
         {session.role === 'ADMIN' ? 'All complaints' : 'Department queue'}
       </h1>
-      <p className="mt-1 text-sm text-muted">{sorted.length} complaint(s)</p>
+      <p className="mt-1 text-sm text-muted">
+        {open} open of {sorted.length}
+      </p>
 
       {sorted.length === 0 ? (
         <p className="mt-6 text-sm text-muted">Nothing in the queue.</p>
@@ -57,6 +55,17 @@ export default async function QueuePage() {
                       {c.incident.code} · {c.incident.affectedCount} affected
                     </span>
                   )}
+                  {/* Nothing lights up until Layer 8 stamps the due dates. */}
+                  {slaRisk(c, now) === 'BREACHED' && (
+                    <span className="rounded-full bg-red-100 px-2 py-0.5 text-xs text-red-800">
+                      SLA breached
+                    </span>
+                  )}
+                  {slaRisk(c, now) === 'AT_RISK' && (
+                    <span className="rounded-full bg-orange-100 px-2 py-0.5 text-xs text-orange-800">
+                      SLA approaching
+                    </span>
+                  )}
                 </div>
                 <p className="mt-1 font-medium">{c.title}</p>
                 <p className="mt-0.5 text-sm text-muted">
@@ -64,6 +73,7 @@ export default async function QueuePage() {
                   {c.department?.name ?? 'Unrouted'}
                   {c.location ? ` · ${c.location.name}` : ''} ·{' '}
                   {c.isAnonymous ? 'Anonymous' : c.reporter.name} · {c.createdAt.toLocaleString('en-IN')}
+                  {c.assignee ? ` · with ${c.assignee.name}` : ''}
                 </p>
               </Link>
             </li>

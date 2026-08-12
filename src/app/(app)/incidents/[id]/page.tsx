@@ -4,6 +4,9 @@ import { requireSession } from '@/lib/auth/session';
 import { PriorityBadge, StatusBadge } from '@/components/badges';
 import { INCIDENT_STATUS_LABEL } from '@/lib/incidents/message';
 import { canViewIncident, loadIncident, reporterLabel } from '@/lib/incidents/view';
+import { nextStatuses } from '@/lib/lifecycle/machine';
+import { IncidentActions } from './incident-actions';
+import type { ComplaintStatus } from '@/generated/prisma/enums';
 
 /**
  * The §17 incident view: one issue, its scale, and the complaints inside it.
@@ -21,6 +24,10 @@ export default async function IncidentPage({ params }: PageProps<'/incidents/[id
   const isStudent = session.role === 'STUDENT';
   const { incident, message } = view;
   const members = incident.complaints.filter((c) => !isStudent || c.reporterId === session.sub);
+
+  // Every move that is legal for at least one member. A member that cannot make
+  // it is skipped by the API and reported back, rather than blocking the rest.
+  const actions = isStudent ? [] : dedupeActions(incident.complaints.map((c) => c.status), session.role);
 
   return (
     <div className="space-y-6">
@@ -56,6 +63,14 @@ export default async function IncidentPage({ params }: PageProps<'/incidents/[id
         )}
         {isStudent && message && <p className="mt-2 text-sm text-muted">{message.body}</p>}
       </section>
+
+      {!isStudent && (
+        <IncidentActions
+          incidentId={incident.id}
+          memberCount={incident.complaints.length}
+          actions={actions}
+        />
+      )}
 
       <section className="rounded-lg border border-line bg-surface p-5">
         <h2 className="text-sm font-medium">
@@ -100,4 +115,25 @@ export default async function IncidentPage({ params }: PageProps<'/incidents/[id
       )}
     </div>
   );
+}
+
+/**
+ * The union of what the members allow, labelled for a bulk action. Union rather
+ * than intersection because an incident whose members are at different stages
+ * should still be resolvable in one click once the fix is in.
+ */
+function dedupeActions(statuses: ComplaintStatus[], role: 'STAFF' | 'DEPT_MANAGER' | 'ADMIN' | 'STUDENT') {
+  const byStatus = new Map<ComplaintStatus, { status: ComplaintStatus; label: string; requiresNote: boolean }>();
+  for (const status of statuses) {
+    for (const rule of nextStatuses(status, role)) {
+      if (!byStatus.has(rule.to)) {
+        byStatus.set(rule.to, {
+          status: rule.to,
+          label: `${rule.label} all`,
+          requiresNote: Boolean(rule.requiresNote),
+        });
+      }
+    }
+  }
+  return [...byStatus.values()];
 }

@@ -4,6 +4,7 @@ import { bestMatch, type DedupAttributes, type DedupCandidate, type DedupScore }
 import type { Classification } from '@/lib/engine/classify';
 import { ancestryIndex } from '@/lib/locations';
 import { incidentPriority } from './priority';
+import { rollupIncidentStatus } from './status';
 import type { CategorySchema } from '@/lib/engine/types';
 import type { Prisma } from '@/generated/prisma/client';
 import type { IncidentStatus } from '@/generated/prisma/enums';
@@ -305,22 +306,45 @@ export async function mergeIntoIncident(input: {
  * affected student.
  */
 export async function recountIncident(incidentId: string) {
-  const members = await prisma.complaint.findMany({
-    where: { incidentId },
-    select: { reporterId: true, priority: true },
-  });
+  const [members, current] = await Promise.all([
+    prisma.complaint.findMany({
+      where: { incidentId },
+      select: { reporterId: true, priority: true, status: true },
+    }),
+    prisma.incident.findUnique({ where: { id: incidentId }, select: { resolvedAt: true } }),
+  ]);
 
   const affectedCount = new Set(members.map((m) => m.reporterId)).size;
   const rollup = incidentPriority(
     members.map((m) => m.priority),
     affectedCount,
   );
+  const status = rollupIncidentStatus(members.map((m) => m.status));
+  const cleared = status.status === 'RESOLVED' || status.status === 'CLOSED';
 
   return prisma.incident.update({
     where: { id: incidentId },
-    data: { affectedCount, priority: rollup.priority },
+    data: {
+      affectedCount,
+      priority: rollup.priority,
+      status: status.status,
+      // Stamped the first time the whole incident clears, and cleared again if a
+      // new report or a reopen puts it back in play.
+      resolvedAt: cleared ? (current?.resolvedAt ?? new Date()) : null,
+    },
   });
 }
+
+/**
+ * The incident half of a member's status change (Layer 6). Separate from
+ * `recountIncident` only so `lifecycle/transition.ts` has one obvious thing to
+ * call; both end up recomputing the same derived row, because an incident never
+ * stores a status of its own — it stores what its members add up to.
+ */
+export async function syncIncidentStatus(incidentId: string) {
+  return recountIncident(incidentId);
+}
+
 
 async function collectEmptyIncident(incidentId: string) {
   const remaining = await prisma.complaint.count({ where: { incidentId } });

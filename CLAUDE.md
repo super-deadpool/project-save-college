@@ -42,6 +42,10 @@ GROQ_API_KEY= npx tsx scripts/layer4-nokey.ts   # the no-key run, through the se
 
 GROQ_API_KEY= npx tsx scripts/layer5-nokey.ts   # the Layer 5 gate — isolates its own history, asserts exact counts
 ./scripts/layer5-gate.sh              # §16 from four real logins + incident RBAC (needs npm run dev)
+
+GROQ_API_KEY= npx tsx scripts/layer6-nokey.ts   # the Layer 6 gate — full §19 path + the incident-wide action
+./scripts/layer6-gate.sh              # the same over the API, plus the four refusals (needs npm run dev)
+npx tsx scripts/layer6-backfill.ts    # one-off: give pre-Layer-6 complaints a lifecycle (idempotent)
 ```
 
 Ports: app **3000** · Postgres **5433** (not 5432 — avoids clashing with a local instance) · Adminer **8080**
@@ -78,16 +82,24 @@ src/lib/
     routing.ts                 # table-driven department + confidence (pure)
   drafts/service.ts          # draft persistence + DraftView for the chat UI
   complaints/assess.ts       # the ONE place classify + priority + routing run
-  complaints/create.ts       # persists an assessment + code + CREATED event
+  complaints/create.ts       # persists an assessment, then walks it to ASSIGNED
+  complaints/access.ts       # who may *act* on a complaint (404 vs 403)
   dedup/
     score.ts                 # pure: 0.55 signature · 0.15 location · 0.15 text · 0.15 time
     candidates.ts            # the SQL half — pg_trgm similarity over open incidents
   incidents/
     priority.ts                # pure: max(members) + scale escalation
+    status.ts                  # pure: member statuses → IncidentStatus + reason
     message.ts                 # pure: §36 student-facing incident message
-    service.ts                 # attach / link / merge / recount
+    service.ts                 # attach / link / merge / recount / syncIncidentStatus
+    actions.ts                 # §17: one status applied to every member
     view.ts                    # one loader for the page and the API
-  lifecycle/  transition() + event timeline
+  lifecycle/
+    machine.ts                 # pure: the §19 transition table, canTransition, pathTo
+    stepper.ts                 # pure: §20's tracker — status + stamps → steps
+    timeline.ts                # pure: event → headline/detail; statusStamps()
+    transition.ts              # the ONE writer of Complaint.status + its events
+  queue/rank.ts                # pure: §21 ordering, null-safe on Layer 8's due dates
   sla/        due dates, breach detection, escalation ladder
   analytics/  raw SQL aggregations, recurring detection, health score
 src/proxy.ts                 # Next 16 renamed middleware → proxy
@@ -114,7 +126,14 @@ tests/                       # mirrors src/lib paths
 - **A category's options must not overlap another category's.** Cleaning is SANITATION, taps and drains are WATER, power is ELECTRICAL. Overlapping hints make the keyword classifier flip a coin between them — and the loser is decided by declaration order, which is not a decision. `tests/engine/schemas.test.ts` holds the invariants.
 - **Never use scope/impact/duration hints as category evidence.** `extractCategory` skips options on `signal` slots: "my wing" and "since yesterday" describe circumstances every category shares.
 - **A band is never returned or displayed without its reasons** (§14). Students see the sentences; staff also see points, details, score, routing confidence and the signature. Routing *uncertainty* is never student-facing (§39) — an unrouted complaint reads "to be assigned by the campus office".
-- **Status changes go through `lifecycle/transition()` only.** Never a bare `prisma.complaint.update({ data: { status } })` — it would skip the transition table and the event timeline.
+- **Status changes go through `lifecycle/transition()` only.** Never a bare `prisma.complaint.update({ data: { status } })` — it would skip the transition table and the event timeline. `transition()` also owns the `respondedAt`/`resolvedAt`/`closedAt` stamps and `reopenCount`; nothing else writes them.
+- **`lifecycle/machine.ts` is the whole truth about legality, and it has no shortcut edges.** `ASSIGNED → IN_PROGRESS` is deliberately absent: `respondedAt` is stamped on `ACKNOWLEDGED` and Layer 8 measures its response SLA against it, so a shortcut would leave a worked-on complaint with no response time. Anything that needs to cross several rungs uses `pathTo()` and takes them one at a time.
+- **`pathTo()` is for the incident-wide action, never for a single complaint.** A complaint's buttons come from `nextStatuses()`, where the ladder's strictness is the point. Bulk resolve walks, because forty members sit at forty different rungs. Intermediate steps may never be ones that `requiresNote` — nobody is carried *through* "rejected" en route somewhere else.
+- **A rule's `narration` is what the feed says, not the enum.** §20 reads "Investigation started" and "Assigned to IT Services". A new transition without a narration would surface a raw enum to a student.
+- **`Incident.status` is derived, never written by hand.** `recountIncident()` recomputes it from the members on every transition: active if **any** member is being worked on, resolved only if **every** one is. Writing it directly would make the two directions of §17 disagree.
+- **Submission walks the first two steps.** `createComplaint` runs SUBMITTED → ANALYZING → ASSIGNED through `transition()` because the analysis really has already happened. A complaint routing could not place stops at ANALYZING — that is §15's human decision, and pretending it was assigned would hide it.
+- **Load `ComplaintEvent` ordered by `[createdAt, id]`.** Submission writes three events inside one millisecond and Prisma's `DateTime` only stores milliseconds; cuid v1 sorts by creation time, so the id is the tiebreak that keeps the feed in the order things happened.
+- **The §21 queue ordering is a pure function over nullable due dates.** `queue/rank.ts` must keep working before Layer 8 stamps `responseDueAt`/`resolutionDueAt` — no dates means the at-risk bucket never fires and the order degrades to band → score → age.
 - **Every complaint has exactly one incident.** Size-1 incidents are hidden in the UI (`isSharedIncident()`). No nullable-incident branching anywhere. A merge that empties an incident deletes it — an incident with no members is a leftover, not a record.
 - **`affectedCount` is distinct *reporters*, not complaints.** §18 says "47 students have reported this issue"; one student filing twice is one affected student. Always recompute it with `recountIncident()` rather than incrementing.
 - **Dedup escalates the incident, never the member.** Linking must not touch a complaint's stored band — the student agreed to that band (§12). Scale (5 → +1, 20 → +2) moves `Incident.priority` only.
@@ -144,15 +163,15 @@ Read this first, update it last. Mirrors `plan.MD`.
 | 3 | LLM extraction adapter (Groq) | ✅ Gate passed |
 | 4 | Classification, priority, routing, explainability | ✅ Gate passed |
 | 5 | Dedup & incidents | ✅ Gate passed |
-| 6 | Lifecycle & staff workflow | ⬜ Next |
-| 7 | Attachments & anonymous reporting | ⬜ |
+| 6 | Lifecycle & staff workflow | ✅ Gate passed |
+| 7 | Attachments & anonymous reporting | ⬜ Next |
 | 8 | SLA & escalation | ⬜ |
 | 9 | Resolution confirmation, reopen, feedback | ⬜ |
 | 10 | Analytics, dashboards, insights | ⬜ |
 | 11 | Search & discovery | ⬜ |
 | 12 | AI insight narratives (notifications deferred) | ⬜ |
 
-**Carried into later layers:** incident status is fixed at `OPEN` — propagating it from member complaints is Layer 6's job, and `lib/incidents/view.ts` already derives what that will need. The §36 message text already branches on `RESOLVED`/`CLOSED`.
+**Carried into later layers:** the transition table already permits Layer 9's two student moves (`RESOLVED → CLOSED` and `RESOLVED → REOPENED`, the reopen needing a reason), so that layer adds screens and a `Feedback` row rather than new rules — `reopenCount` is already incremented and the stamps cleared on reopen. Layer 8 fills `responseDueAt`/`resolutionDueAt`, at which point the queue's SLA-at-risk bucket and its badges light up with no change to `queue/rank.ts`.
 
 - auto compact at 60% capacity and after 3 times of auto compacting in a row . make the summary of the session to give to new session
 - Do not build until you have 95% confidence of what you are building. To get the confidence ask me for questions.
