@@ -9,7 +9,12 @@ const NAV: Record<Role, { href: string; label: string }[]> = {
     { href: '/report', label: 'Report an issue' },
     { href: '/complaints', label: 'My complaints' },
   ],
-  STAFF: [{ href: '/queue', label: 'Queue' }],
+  // §32's dashboard is for the department, so staff get it too — "what needs
+  // attention right now" is their question before it is their manager's.
+  STAFF: [
+    { href: '/dashboard', label: 'Dashboard' },
+    { href: '/queue', label: 'Queue' },
+  ],
   DEPT_MANAGER: [
     { href: '/dashboard', label: 'Dashboard' },
     { href: '/queue', label: 'Queue' },

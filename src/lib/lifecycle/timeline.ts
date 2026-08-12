@@ -1,4 +1,5 @@
 import type { ComplaintStatus, EventType } from '@/generated/prisma/enums';
+import { TARGET_LABEL } from '@/lib/sla/breach';
 
 /**
  * §20's update feed. The spec's example is plain sentences against a clock:
@@ -58,8 +59,29 @@ export function timelineEntry(event: TimelineEvent): TimelineEntry {
     to?: ComplaintStatus;
     departmentName?: string;
     viaIncident?: string;
+    kind?: 'RESPONSE' | 'RESOLUTION' | 'RESOLUTION_2X';
+    notify?: 'DEPT_MANAGER' | 'ADMIN';
+    notifyName?: string;
+    rating?: number;
   };
   let headline = HEADLINE[event.type] ?? event.type;
+
+  // Layer 8's two events say which promise was broken and who now owns it. Like
+  // a status change, they are worded from `meta` rather than from the enum — a
+  // resolution breach reading "Response time exceeded" would be a lie in the
+  // student's feed.
+  if (event.type === 'SLA_BREACHED' && meta.kind) {
+    headline = SLA_HEADLINE[meta.kind];
+  }
+  if (event.type === 'ESCALATED' && meta.notify) {
+    headline = `Escalated to ${ESCALATION_TARGET[meta.notify]}`;
+    if (meta.notifyName) headline = `${headline} · ${meta.notifyName}`;
+  }
+  // §24's rating belongs in the headline: "Feedback submitted" alone tells a
+  // staff member nothing they would act on.
+  if (event.type === 'FEEDBACK_SUBMITTED' && typeof meta.rating === 'number') {
+    headline = `${headline} · ${meta.rating}/5`;
+  }
 
   if (event.type === 'STATUS_CHANGED') {
     headline = meta.narration ?? (meta.to ? `Now ${meta.to.toLowerCase().replace(/_/g, ' ')}` : headline);
@@ -86,6 +108,17 @@ export function timelineEntry(event: TimelineEvent): TimelineEntry {
 }
 
 const NAMES_ACTOR = new Set<EventType>(['PROGRESS_UPDATE', 'INFO_REQUESTED', 'ASSIGNED', 'COMMENT']);
+
+/** §22's three failures, named by what was missed rather than by the enum. */
+const SLA_HEADLINE: Record<'RESPONSE' | 'RESOLUTION' | 'RESOLUTION_2X', string> = {
+  RESPONSE: 'Response time exceeded',
+  RESOLUTION: 'Resolution time exceeded',
+  RESOLUTION_2X: 'Twice the resolution time exceeded',
+};
+
+// The names for §22's two rungs live with the ladder itself (`sla/breach.ts`), so
+// the feed and the escalation cannot describe the same handover differently.
+const ESCALATION_TARGET = TARGET_LABEL;
 
 /**
  * When each status was entered, read off the timeline — the stepper's input.

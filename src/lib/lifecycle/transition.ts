@@ -1,7 +1,8 @@
 import { prisma } from '@/lib/db';
 import { syncIncidentStatus } from '@/lib/incidents/service';
+import { dueDatesForDepartment } from '@/lib/sla/service';
 import { canTransition, STATUS_LABEL, type TransitionActor } from './machine';
-import type { ComplaintStatus } from '@/generated/prisma/enums';
+import type { ComplaintStatus, EventType } from '@/generated/prisma/enums';
 import type { Prisma } from '@/generated/prisma/client';
 
 /**
@@ -53,6 +54,11 @@ export async function transition(input: TransitionInput): Promise<TransitionOutc
       incidentId: true,
       respondedAt: true,
       departmentId: true,
+      // Layer 8: the band and the current promise, so the SLA clock can be
+      // started, restarted or torn up as part of the same move.
+      priority: true,
+      responseDueAt: true,
+      resolutionDueAt: true,
     },
   });
   if (!complaint) {
@@ -76,10 +82,13 @@ export async function transition(input: TransitionInput): Promise<TransitionOutc
 
   const now = new Date();
   const stamps: {
-    respondedAt?: Date;
+    respondedAt?: Date | null;
     resolvedAt?: Date | null;
     closedAt?: Date | null;
     reopenCount?: { increment: number };
+    responseDueAt?: Date | null;
+    resolutionDueAt?: Date | null;
+    escalationLevel?: number;
   } = {};
 
   // `respondedAt` is the moment a human first took the complaint on. Layer 8's
@@ -95,6 +104,36 @@ export async function transition(input: TransitionInput): Promise<TransitionOutc
     stamps.resolvedAt = null;
     stamps.closedAt = null;
     stamps.reopenCount = { increment: 1 };
+    // §23's reopen re-flags the department, which means a fresh promise: the
+    // complaint has to be answered and fixed again, and it should not still be
+    // wearing the escalations of the round that ended in a resolution the
+    // student rejected. The new clock is stamped when it next reaches a
+    // department (below), or on the spot if it goes straight back into work.
+    stamps.respondedAt = null;
+    stamps.responseDueAt = null;
+    stamps.resolutionDueAt = null;
+    stamps.escalationLevel = 0;
+  }
+
+  // §22's clock starts when a complaint lands on a department's desk. ASSIGNED
+  // always (re)starts it — a hand-routed triage case and a reassigned reopen are
+  // both a department taking the complaint on for the first time. ACKNOWLEDGED
+  // and IN_PROGRESS only fill a gap: REOPENED → IN_PROGRESS skips ASSIGNED, and
+  // complaints from before this layer have no due dates at all.
+  const departmentId = input.departmentId !== undefined ? input.departmentId : complaint.departmentId;
+  const undated = complaint.responseDueAt == null && complaint.resolutionDueAt == null;
+  const startsClock =
+    input.to === 'ASSIGNED' ||
+    ((input.to === 'ACKNOWLEDGED' || input.to === 'IN_PROGRESS') && undated);
+
+  if (startsClock) {
+    const due = await dueDatesForDepartment(departmentId, complaint.priority, now);
+    if (due) {
+      stamps.responseDueAt = due.responseDueAt;
+      stamps.resolutionDueAt = due.resolutionDueAt;
+      // A complaint whose clock has just been restarted is nobody's failure yet.
+      if (input.to === 'ASSIGNED') stamps.escalationLevel = 0;
+    }
   }
 
   await prisma.complaint.update({
@@ -149,7 +188,12 @@ export async function transition(input: TransitionInput): Promise<TransitionOutc
  */
 export async function recordEvent(input: {
   complaintId: string;
-  type: 'PROGRESS_UPDATE' | 'INFO_REQUESTED' | 'INFO_PROVIDED' | 'ASSIGNED' | 'COMMENT';
+  /**
+   * Anything except the two this module owns: `STATUS_CHANGED` belongs to
+   * `transition()` above, and `CREATED` is written once, by the submission that
+   * creates the complaint row.
+   */
+  type: Exclude<EventType, 'STATUS_CHANGED' | 'CREATED'>;
   actorId: string | null;
   message: string;
   isInternal?: boolean;

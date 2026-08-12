@@ -158,9 +158,16 @@ export const STATUS_LABEL: Record<ComplaintStatus, string> = {
 /** Nothing more will happen here on its own. `CLOSED` is reopenable, not dead. */
 const TERMINAL: ComplaintStatus[] = ['CLOSED', 'REJECTED', 'DUPLICATE'];
 
-/** Work is finished — used by the queue to sink a row and by the incident rollup. */
+/**
+ * Work is finished — used by the queue to sink a row, by the incident rollup, and
+ * by Layer 8 to decide there is no live promise left to break. Exported as a list
+ * as well as a predicate so a database query can ask the same question without
+ * re-listing the statuses itself.
+ */
+export const SETTLED_STATUSES: ComplaintStatus[] = ['RESOLVED', ...TERMINAL];
+
 export function isSettled(status: ComplaintStatus): boolean {
-  return status === 'RESOLVED' || TERMINAL.includes(status);
+  return SETTLED_STATUSES.includes(status);
 }
 
 /** Someone in the department has the complaint in hand. */

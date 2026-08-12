@@ -1,8 +1,24 @@
 import Link from 'next/link';
 import { requireRole } from '@/lib/auth/session';
 import { prisma } from '@/lib/db';
-import { PriorityBadge, StatusBadge } from '@/components/badges';
-import { queueBucket, slaRisk, sortQueue } from '@/lib/queue/rank';
+import { EscalationBadge, PriorityBadge, SlaBadge, StatusBadge } from '@/components/badges';
+import { activeDeadline, queueBucket, slaRisk, sortQueue } from '@/lib/queue/rank';
+import { describeMinutes, minutesBetween } from '@/lib/sla/due';
+import { isSettled } from '@/lib/lifecycle/machine';
+import type { QueueRow } from '@/lib/queue/rank';
+
+/**
+ * "due in 3 h" / "overdue by 40 min" for whichever clock is still running — the
+ * response one until somebody acknowledges the complaint, the resolution one
+ * after. Silent for finished work and for anything with no promise attached.
+ */
+function deadlineNote(row: QueueRow, now: Date): string | null {
+  if (isSettled(row.status)) return null;
+  const due = activeDeadline(row);
+  if (!due) return null;
+  const minutes = minutesBetween(now, due);
+  return minutes >= 0 ? `due in ${describeMinutes(minutes)}` : `overdue by ${describeMinutes(minutes)}`;
+}
 
 export default async function QueuePage() {
   const session = await requireRole('STAFF', 'DEPT_MANAGER', 'ADMIN');
@@ -55,17 +71,10 @@ export default async function QueuePage() {
                       {c.incident.code} · {c.incident.affectedCount} affected
                     </span>
                   )}
-                  {/* Nothing lights up until Layer 8 stamps the due dates. */}
-                  {slaRisk(c, now) === 'BREACHED' && (
-                    <span className="rounded-full bg-red-100 px-2 py-0.5 text-xs text-red-800">
-                      SLA breached
-                    </span>
-                  )}
-                  {slaRisk(c, now) === 'AT_RISK' && (
-                    <span className="rounded-full bg-orange-100 px-2 py-0.5 text-xs text-orange-800">
-                      SLA approaching
-                    </span>
-                  )}
+                  {/* Layer 8 stamps the due dates; these two are what §21's
+                      "SLA approaching" bucket looks like on the row itself. */}
+                  <SlaBadge risk={slaRisk(c, now)} />
+                  <EscalationBadge level={c.escalationLevel} />
                 </div>
                 <p className="mt-1 font-medium">{c.title}</p>
                 <p className="mt-0.5 text-sm text-muted">
@@ -74,6 +83,9 @@ export default async function QueuePage() {
                   {c.location ? ` · ${c.location.name}` : ''} ·{' '}
                   {c.isAnonymous ? 'Anonymous' : c.reporter.name} · {c.createdAt.toLocaleString('en-IN')}
                   {c.assignee ? ` · with ${c.assignee.name}` : ''}
+                  {/* The deadline in words: staff order their day by "how long
+                      have I got", not by a timestamp they have to subtract. */}
+                  {deadlineNote(c, now) && ` · ${deadlineNote(c, now)}`}
                 </p>
               </Link>
             </li>

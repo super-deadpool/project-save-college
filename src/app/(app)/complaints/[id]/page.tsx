@@ -2,16 +2,21 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { requireSession } from '@/lib/auth/session';
 import { prisma } from '@/lib/db';
-import { PriorityBadge, StatusBadge } from '@/components/badges';
+import { EscalationBadge, PriorityBadge, SlaBadge, StatusBadge } from '@/components/badges';
 import { getCategory } from '@/lib/engine/schemas';
 import { summaryLines } from '@/lib/engine/summary';
 import { incidentMessage, isSharedIncident } from '@/lib/incidents/message';
 import { Stepper } from '@/components/stepper';
-import { nextStatuses } from '@/lib/lifecycle/machine';
+import { isSettled, nextStatuses } from '@/lib/lifecycle/machine';
 import { stepperFor } from '@/lib/lifecycle/stepper';
 import { statusStamps, timelineEntry, visibleTo } from '@/lib/lifecycle/timeline';
+import { slaOutcome, slaState } from '@/lib/sla/breach';
+import { describeMinutes, minutesBetween } from '@/lib/sla/due';
+import { describeSlaPromise } from '@/lib/sla/service';
+import { slaRisk } from '@/lib/queue/rank';
 import { MergeSuggestion } from './merge-suggestion';
 import { StaffActions, StudentReply } from './lifecycle-actions';
+import { FeedbackGiven, RatingForm, ResolutionConfirm } from './resolution';
 import type { PriorityReason } from '@/lib/engine/priority';
 import type { SlotValues } from '@/lib/engine/types';
 
@@ -27,6 +32,7 @@ export default async function ComplaintDetailPage({ params }: PageProps<'/compla
       reporter: true,
       assignee: true,
       incident: true,
+      feedback: true,
       // cuid v1 sorts by creation time, which keeps two events written in the
       // same millisecond — submission writes three — in the order they happened.
       events: { orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], include: { actor: true } },
@@ -47,6 +53,8 @@ export default async function ComplaintDetailPage({ params }: PageProps<'/compla
     : [];
 
   const isStudentView = session.role === 'STUDENT';
+  // §23/§24 belong to the person it happened to, not to whoever can see the page.
+  const isReporter = complaint.reporterId === session.sub;
 
   // §36 — a shared issue gets the incident message instead of a generic ack. A
   // size-1 incident stays invisible: it is just this complaint (plan.MD §6).
@@ -113,9 +121,13 @@ export default async function ComplaintDetailPage({ params }: PageProps<'/compla
   // them from here. Two are pulled out because they are more than a status
   // change: accepting also claims ownership, and asking for information needs
   // the question itself.
+  // §23 takes the third one away: closing a resolved complaint is the student's
+  // answer to "was it actually fixed", so staff are not offered the button. The
+  // transition table still permits it — legality is one question, and whose
+  // decision it is is another.
   const staffActions = !isStudentView
     ? nextStatuses(complaint.status, session.role)
-        .filter((r) => r.to !== 'ACKNOWLEDGED' && r.to !== 'WAITING_FOR_STUDENT')
+        .filter((r) => r.to !== 'ACKNOWLEDGED' && r.to !== 'WAITING_FOR_STUDENT' && r.to !== 'CLOSED')
         .map((r) => ({ status: r.to, label: r.label, requiresNote: Boolean(r.requiresNote) }))
     : [];
   const canAccept = !isStudentView && nextStatuses(complaint.status, session.role).some((r) => r.to === 'ACKNOWLEDGED');
@@ -127,6 +139,17 @@ export default async function ComplaintDetailPage({ params }: PageProps<'/compla
     complaint.status === 'WAITING_FOR_STUDENT'
       ? ([...complaint.events].reverse().find((e) => e.type === 'INFO_REQUESTED')?.message ?? null)
       : null;
+
+  // §22 — the promise this complaint carries, and whether it is being kept. The
+  // state comes from the same pure function the worker escalates on, so the panel
+  // and the ladder can never disagree about whether something is late.
+  const now = new Date();
+  const sla = slaState(complaint, now);
+  const outcome = slaOutcome(complaint);
+  const promise = !isStudentView
+    ? await describeSlaPromise(complaint.departmentId, complaint.priority)
+    : null;
+  const live = !isSettled(complaint.status);
 
   const reasons = complaint.priorityReasons as unknown as PriorityReason[];
   // §14 — the band is never shown without its reasons. Students get the
@@ -147,6 +170,8 @@ export default async function ComplaintDetailPage({ params }: PageProps<'/compla
               Needs triage
             </span>
           )}
+          {!isStudentView && <SlaBadge risk={slaRisk(complaint, now)} />}
+          {!isStudentView && <EscalationBadge level={complaint.escalationLevel} />}
         </div>
         <h1 className="mt-2 text-xl font-semibold">{complaint.title}</h1>
         <p className="mt-1 text-sm text-muted">
@@ -165,10 +190,90 @@ export default async function ComplaintDetailPage({ params }: PageProps<'/compla
         <div className="mt-4">
           <Stepper steps={steps} />
         </div>
+        {/* One honest sentence about the promise, for the person waiting on it.
+            The detail — which clock, how late, who it went to — is staff-facing. */}
+        {isStudentView && live && complaint.resolutionDueAt && (
+          <p className="mt-4 border-t border-line pt-3 text-sm text-muted">
+            {sla.resolutionBreached
+              ? `This is taking longer than the ${complaint.department?.name ?? 'department'} promised. It has been escalated.`
+              : `Expected to be resolved by ${complaint.resolutionDueAt.toLocaleString('en-IN')}.`}
+          </p>
+        )}
       </section>
+
+      {/* §22, staff-facing: the promise, both clocks, and where on the ladder
+          this complaint sits. */}
+      {!isStudentView && (complaint.responseDueAt || complaint.resolutionDueAt) && (
+        <section className="rounded-lg border border-line bg-surface p-5">
+          <h2 className="text-sm font-medium">Service promise</h2>
+          {promise && <p className="mt-1 text-xs text-muted">{promise}</p>}
+          <dl className="mt-3 grid gap-3 sm:grid-cols-2">
+            <div className="text-sm">
+              <dt className="text-muted">Response due</dt>
+              <dd>
+                {complaint.responseDueAt ? complaint.responseDueAt.toLocaleString('en-IN') : '—'}
+                {complaint.respondedAt ? (
+                  <span className={outcome.responseMet === false ? 'block text-xs text-red-700' : 'block text-xs text-green-700'}>
+                    answered {complaint.respondedAt.toLocaleString('en-IN')}
+                    {outcome.responseMet === false ? ' · late' : ' · on time'}
+                  </span>
+                ) : complaint.responseDueAt && live ? (
+                  <span className={sla.responseBreached ? 'block text-xs text-red-700' : 'block text-xs text-muted'}>
+                    {sla.responseBreached
+                      ? `overdue by ${describeMinutes(minutesBetween(complaint.responseDueAt, now))}`
+                      : `${describeMinutes(minutesBetween(now, complaint.responseDueAt))} left`}
+                  </span>
+                ) : null}
+              </dd>
+            </div>
+            <div className="text-sm">
+              <dt className="text-muted">Resolution due</dt>
+              <dd>
+                {complaint.resolutionDueAt ? complaint.resolutionDueAt.toLocaleString('en-IN') : '—'}
+                {complaint.resolvedAt ? (
+                  <span className={outcome.resolutionMet === false ? 'block text-xs text-red-700' : 'block text-xs text-green-700'}>
+                    resolved {complaint.resolvedAt.toLocaleString('en-IN')}
+                    {outcome.resolutionMet === false ? ' · late' : ' · on time'}
+                  </span>
+                ) : complaint.resolutionDueAt && live ? (
+                  <span className={sla.resolutionBreached ? 'block text-xs text-red-700' : 'block text-xs text-muted'}>
+                    {sla.resolutionBreached
+                      ? `overdue by ${describeMinutes(minutesBetween(complaint.resolutionDueAt, now))}`
+                      : `${describeMinutes(minutesBetween(now, complaint.resolutionDueAt))} left`}
+                  </span>
+                ) : null}
+              </dd>
+            </div>
+          </dl>
+          {complaint.escalationLevel > 0 && (
+            <p className="mt-3 border-t border-line pt-3 text-sm">
+              Escalated to rung {complaint.escalationLevel} of 3
+              {complaint.escalationLevel >= 3 && ' — flagged for the administration'}
+              <span className="block text-xs text-muted">
+                Every rung is in the feed below, with the deadline it missed.
+              </span>
+            </p>
+          )}
+        </section>
+      )}
 
       {complaint.status === 'WAITING_FOR_STUDENT' && complaint.reporterId === session.sub && (
         <StudentReply complaintId={complaint.id} question={pendingQuestion} />
+      )}
+
+      {/* §23 — the reporter decides whether a resolution is really a resolution,
+          and §24 asks how it went once they say it is. Both are theirs alone: a
+          complaint nobody has confirmed stays open no matter who marked it done. */}
+      {isReporter && complaint.status === 'RESOLVED' && <ResolutionConfirm complaintId={complaint.id} />}
+      {isReporter && !complaint.feedback && (complaint.status === 'CLOSED' || complaint.status === 'RESOLVED') && (
+        <RatingForm complaintId={complaint.id} />
+      )}
+      {complaint.feedback && (
+        <FeedbackGiven
+          rating={complaint.feedback.rating}
+          comment={complaint.feedback.comment}
+          resolutionConfirmed={complaint.feedback.resolutionConfirmed}
+        />
       )}
 
       {!isStudentView && (

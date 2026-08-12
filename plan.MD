@@ -380,10 +380,12 @@ State machine with an explicit transition table enforced in one `transition()` f
 
 **Carried into Layer 7–9:** the transition table already permits the two moves Layer 9 needs (`RESOLVED → CLOSED` and `RESOLVED → REOPENED`, both by the student, the reopen requiring a reason), so that layer adds screens and a `Feedback` row rather than new rules. `reopenCount` is already incremented and `resolvedAt`/`closedAt` cleared on reopen.
 
-### Layer 7 — Attachments & anonymous reporting
+### Layer 7 — Attachments & anonymous reporting — **dropped**
 `StorageAdapter` interface + `LocalDiskStorage` (`./uploads`, size/mime caps, served through an auth-checked route handler). Student attachments during the conversation; staff resolution evidence; **voice input via the browser's Web Speech API** (free, no server transcription — transcript feeds the same text pipeline). Anonymous flag hides student identity from department-facing views while preserving it for admin audit.
 
 **Gate:** upload a photo and a short video, both render for staff; an anonymous complaint shows "Anonymous" in the staff view and the real user only in the admin audit trail.
+
+**Not built (deliberate, 13 Aug 2026).** Evidence and anonymity are additive to the core idea rather than part of it, and nothing downstream depends on them: `Attachment` and `Complaint.isAnonymous` exist in the schema from Layer 0, the queue and the staff views already read `isAnonymous` when rendering a reporter's name, and no analytics figure counts attachments. Picking it up later touches uploads, one route handler and two views — not the pipeline.
 
 ### Layer 8 — SLA & escalation
 `SlaProfile`-driven `responseDueAt` / `resolutionDueAt` set on assignment. Worker (`node-cron`, every minute) scans breaches and walks the ladder: response breach → dept manager, resolution breach → admin, 2× resolution → admin + flagged (§22). SLA-at-risk badges in the queue.
@@ -392,10 +394,43 @@ Include a **dev-only clock-simulation endpoint** (`/api/dev/advance-clock`) so S
 
 **Gate:** create a HIGH complaint, advance the simulated clock past the response window, observe escalation to the manager plus timeline events.
 
+**Gate result (passed).** 369 vitest tests at the time, `GROQ_API_KEY= npx tsx scripts/layer8-nokey.ts` (the gate proper) and `scripts/layer8-gate.sh` over the API with the demo clock. One complaint picks up both deadlines from its department's own profile on assignment, is aged past each deadline in turn, and climbs the ladder 0 → 1 (manager) → 2 (admin) → 3 (flagged), each rung leaving a `SLA_BREACHED` and an `ESCALATED` event; a second sweep a moment later writes nothing; a complaint answered on time skips the response rung entirely; settled work is never escalated; and a reopen tears up the old promise and issues a fresh one.
+
+**As built.** Four decisions shaped this layer:
+
+- **The promise is stamped by `transition()`, not beside it.** Layer 6 already made that function the only writer of `respondedAt`/`resolvedAt`/`closedAt`; the due dates join them, because "this complaint reached a department" *is* a status change. ASSIGNED always (re)starts both clocks; ACKNOWLEDGED and IN_PROGRESS only fill a gap, which is what gives the pre-Layer-8 rows and the `REOPENED → IN_PROGRESS` shortcut a promise at all.
+- **A rung is only climbed when its own failure happened.** `escalationPlan()` filters the ladder by the breach flags rather than walking 0 → 1 → 2, so a complaint acknowledged in two minutes and then left unrepaired for a week goes straight to the administrator. Walking every rung would put a "nobody responded" failure in the timeline of a complaint that was answered immediately.
+- **Idempotence is the design, not a safeguard.** `escalationLevel` records the rung reached, and the sweep only ever moves a complaint *up* from it. That is what makes a once-a-minute cron safe, lets the dev endpoint and the worker both trigger it, and means a missed minute costs nothing.
+- **The demo clock ages the complaint instead of moving "now".** Every pure module already takes `now` as an argument and the worker runs in its own process, so a global clock offset would have to be threaded through all of them *and* shared across processes. Shifting one complaint's own timestamps back achieves the same demo with no changes to the domain layer, and it agrees with the worker for free.
+
+**Deviations from the design above, all deliberate:**
+
+| Design | As built | Why |
+|---|---|---|
+| `/api/dev/advance-clock` moves the clock forward | it makes the target complaint older | A simulated global "now" would have to be persisted (the worker is a separate process) and injected into every pure function. Ageing rows keeps one real clock, and one complaint can be aged without disturbing the rest of the campus. |
+| escalation notifies people | it records who it went to | §35/§36's notifications stay deferred, so the `ESCALATED` event names the manager or administrator in `meta` and the queue/complaint page show the rung. The recipient lookup is real; only the delivery is missing. |
+| "2× resolution" measured from assignment | measured from `createdAt` | Due dates are stamped seconds after submission, so the two are the same instant in practice — and using `createdAt` keeps `SlaRow` free of a column that would exist to answer one question. |
+| §22's ladder ends at "admin + flagged" | `escalationLevel >= 3` *is* the flag | No new column: the level already records how far up the ladder a complaint went, and a separate boolean could disagree with it. |
+| — | reopening clears `respondedAt` | §23's reopen re-flags the department, which means the complaint has to be answered *again*. Keeping the old acknowledgement would leave the second attempt with a response SLA that was already satisfied before the work began. |
+
 ### Layer 9 — Resolution confirmation, reopen, feedback
 On RESOLVED, the student is asked "Was the issue actually fixed?" → `[Yes]` closes it, `[No]` reopens with a reason and re-flags the department (§23). Then a 1–5 star rating + comment (§24). Reopen counts feed analytics.
 
 **Gate:** resolve → decline → complaint returns to REOPENED with an event; resolve → accept → CLOSED → rating captured.
+
+**Gate result (passed).** `GROQ_API_KEY= npx tsx scripts/layer9-nokey.ts` and `scripts/layer9-gate.sh` over the API. One complaint is resolved, declined by the student with a reason, comes back as REOPENED with `reopenCount` 1, a cleared `resolvedAt` and a fresh SLA promise, is resolved again, confirmed, closed and rated 4/5; a second is confirmed first time and rated 5/5. Five refusals are exercised: staff confirming on the student's behalf (403), a reason-less decline (400), a rating before there is a resolution (409), a second rating (409), and a stranger rating someone else's complaint (404 — they should not learn it exists).
+
+**As built.** As predicted from Layer 6, this layer added screens and one table row rather than new rules — the transition table already permitted both moves. Three decisions:
+
+- **The question belongs to the reporter, and to nobody else.** Not the department, not an administrator: `confirmResolution()` compares against `reporterId`, so being able to *see* a complaint is not being the person it happened to. The staff panel also stops offering "Close" on a RESOLVED complaint — legality is one question (the table still permits it, and Layer 12's auto-close will need it) and whose decision it is is another.
+- **The logic is a service, not a route body.** `feedback/service.ts` holds both decisions and the routes map outcomes to HTTP. That is what let the no-key gate drive §23 and §24 with no API at all, the same way `createComplaint` and `applyIncidentStatus` are driven.
+- **A rating is an opinion, not a lifecycle step.** It never moves the complaint. It is allowed on RESOLVED as well as CLOSED — but `resolutionConfirmed` records which, so a rating given without confirming the fix cannot be counted as a confirmation. One rating per complaint, or the campus average becomes a count of button presses.
+
+| Design | As built | Why |
+|---|---|---|
+| rating captured after closing | allowed on RESOLVED or CLOSED, flagged either way | A student who rates the work without answering §23 has still said something worth recording; `Feedback.resolutionConfirmed` keeps the two facts apart. |
+| — | `RESOLUTION_CONFIRMED` / `RESOLUTION_REJECTED` events | The status change alone does not record that a *human checked*. §31's confirmed-versus-reopened comparison needs both halves, and the feed reads better for it. |
+| — | the rating appears in the feed headline ("Feedback submitted · 4/5") | "Feedback submitted" alone tells a staff member nothing they would act on. |
 
 ### Layer 10 — Analytics, dashboards, insights
 `prisma/seed-demo.ts` generates **~800 complaints across 6 months** with realistic category/location/seasonal distributions — without history, every analytics feature renders empty and can't be verified. Then: admin overview KPIs (§31), category distribution, department performance comparison, department dashboard (§32), campus heatmap by location density (§28), recurring-issue detection via month-over-month growth per (location, category) with a threshold (§27), preventive maintenance suggestions written to `RecurringSignal` (§30), campus health score (§34):
@@ -407,6 +442,27 @@ health = 100 − openCriticalPenalty − slaBreachRate*25 − reopenRate*15
 computed campus-wide and per category. Aggregations are raw SQL via `$queryRaw`.
 
 **Gate:** dashboards populated from demo data; the heatmap flags the intentionally-overloaded building; the recurring detector fires on the seeded escalating-WiFi trend.
+
+**Gate result (passed, with the demo seed dropped).** `prisma/seed-demo.ts` was **not built** — a deliberate call on 13 Aug 2026 — so the dashboards run on the ~100 complaints the earlier layers' gates created, all of them inside one month. That changed what the gate can honestly claim, so it claims something better: instead of trusting the aggregates because the numbers look plausible against seeded data, `GROQ_API_KEY= npx tsx scripts/layer10-nokey.ts` **recounts every one of them against the row-level modules** — §31's totals against Prisma, the SQL breach count against `sla/breach.ts`, §28's building roll-up against a TypeScript walk of the location tree, §34's score against `healthScore()` — and drives §27 → §30 end to end over a four-month trend it creates and deletes (`L10-` code prefix, cleaned up in a `finally`). `scripts/layer10-gate.sh` then checks the same figures over the API, that the rendered page shows the numbers the API returned, and the RBAC around both.
+
+**As built.** Five decisions shaped this layer:
+
+- **One composition layer, two dashboards, one set of numbers.** `analytics/service.ts` assembles everything; the pages and `/api/analytics/overview` both render its output. That is the same rule `assess.ts` enforces for priority — a figure the page shows must be a figure the API can be asked for, or the two drift.
+- **The pure/impure split holds.** `recurring.ts`, `heatmap.ts` and `health.ts` are pure and unit-tested over synthetic series; `sql.ts` owns every `$queryRaw` (the designated impure module, exactly as `dedup/candidates.ts` is for dedup) and `service.ts` glues them. The breach definition exists **once** in SQL, as a composed `Prisma.sql` fragment reused by the overview, the per-category cut and the department table — and the gate proves that fragment agrees with `sla/breach.ts` complaint by complaint.
+- **A score is never a bare number.** §34 returns its five terms, each signed and with the measurement behind it ("19% of complaints with a deadline missed it"), and the panel prints them under the score. §14's discipline, applied to the campus.
+- **The detector refuses to flatter the data.** Three floors, all of which real data forced: sustained volume (12 in the window), a live latest month (≥4), and — the one the live database exposed — a **baseline to grow from**. With every complaint inside one month the detector was reporting "up 5200% since March" against months that predate the system; it now requires either a non-zero first month or three active months, and where there is no baseline it says "up from none" rather than inventing a percentage.
+- **Charts are server-rendered CSS and SVG, one series each.** No chart library, no client JS: horizontal bars for ranked magnitudes, columns for monthly volume (six discrete readings, not a continuous line), a 2px sparkline for the rolling 30 days, and §28's three bands each printed as a *word* beside its swatch. Colour is a second channel everywhere — two of the three status steps are below 3:1 on white, and the map has to be readable by someone who cannot separate red from amber.
+
+**Deviations from the design above, all deliberate:**
+
+| Design | As built | Why |
+|---|---|---|
+| `prisma/seed-demo.ts`, ~800 complaints over 6 months | not built | Explicit instruction (13 Aug 2026). The cost is that §27's trend and §28's density are thin in the running app; the mitigation is that the gate recounts every aggregate against the row-level modules and drives the detector over a temporary real trend, which is a stronger check than "the dashboard looks populated". |
+| the heatmap keyed on `Complaint.locationId` | rolled up to the **building** via a recursive CTE | §28 names buildings ("CSE Block 🔴 High") but students name whatever they can — usually a room. Eleven scattered room-level complaints are one problem block, and the CTE is what makes them legible as one. |
+| recurring detection per (location, category) | per (**building**, category), same roll-up | Same reason: a trend split across four rooms of one hostel is one trend. |
+| `RecurringSignal` written by the worker | written by the worker **and** an admin button | The nightly cron is right for operations and useless in a walkthrough. Both paths call `scanRecurring()`, which upserts per (category, building, window end), so neither can duplicate the other's rows. |
+| SLA at risk counted in SQL | counted in TypeScript with `slaRisk()` | The 25%-of-window threshold lives in `queue/rank.ts` and is unit-tested there. A department's open queue is a couple of hundred rows, so reusing the tested function beats duplicating the threshold in SQL where it could silently diverge from the queue's badges. |
+| a "dashboard" route per role | one route, two components | An administrator's question is "what is happening across campus"; a department's is "what needs attention right now". Same URL, scope decided by role — so a staff member cannot ask for another department's satisfaction by editing a query string. |
 
 ### Layer 11 — Search & discovery
 Faceted search over status/priority/category/department/location/date + `pg_trgm` full-text on title/description, backing both the student history filters (§37) and admin queries like "complaints that have exceeded their resolution time" (§38).
@@ -433,11 +489,11 @@ Update this table as each gate passes. Mirrored in `CLAUDE.md` §7.
 | 4 | Classification, priority, routing, explainability | ✅ Gate passed |
 | 5 | Dedup & incidents | ✅ Gate passed |
 | 6 | Lifecycle & staff workflow | ✅ Gate passed |
-| 7 | Attachments & anonymous reporting | ⬜ Next |
-| 8 | SLA & escalation | ⬜ |
-| 9 | Resolution confirmation, reopen, feedback | ⬜ |
-| 10 | Analytics, dashboards, insights | ⬜ |
-| 11 | Search & discovery | ⬜ |
+| 7 | Attachments & anonymous reporting | ⬜ Dropped — additive, nothing depends on it |
+| 8 | SLA & escalation | ✅ Gate passed |
+| 9 | Resolution confirmation, reopen, feedback | ✅ Gate passed |
+| 10 | Analytics, dashboards, insights | ✅ Gate passed (no demo seed — see the layer) |
+| 11 | Search & discovery | ⬜ Next |
 | 12 | AI insight narratives (notifications deferred) | ⬜ |
 
 ---
@@ -449,6 +505,8 @@ Update this table as each gate passes. Mirrored in `CLAUDE.md` §7.
 - **Question *selection* is deterministic; only *extraction* is LLM-driven.** Costs some conversational flair, buys testability, zero-cost operation, no hallucinated questions, and real explainability.
 - **No embeddings.** Semantically-distant phrasings of the same issue are caught via post-classification attribute matching rather than vector similarity. Adding pgvector + a local MiniLM model later is a self-contained upgrade to `dedup/score.ts`.
 - **Polling, not websockets,** for status updates — simpler, adequate at this scale; SSE is a drop-in later.
+- **The demo clock ages complaints rather than moving time.** Keeps one real clock in a system whose pure modules all take `now` as an argument and whose worker runs in a separate process. The cost is that "advance the clock" is really "age this complaint", which is a demo script's job anyway.
+- **No demo history.** `seed-demo.ts` was dropped, so §27's trends and §28's density are thin in the running app. The gates compensate by recounting every aggregate against the row-level modules and by driving the recurrence detector over a temporary trend, but a walkthrough will show a sparse heatmap until real complaints accumulate.
 
 ## 9. Verification Strategy
 

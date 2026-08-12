@@ -9,6 +9,7 @@ Core idea (spec §1): **don't make the student know what information is required
 - **Design + layer plan:** `plan.MD` ← read this, not the spec
 - **Current layer:** see §7 below
 - **Deferred:** notifications (§35/§36); no embeddings/pgvector
+- **Dropped:** Layer 7 (attachments, anonymous reporting) and `prisma/seed-demo.ts` — both deliberate, both recorded in `plan.MD`
 
 ## 2. Read this, not that (token discipline)
 
@@ -18,7 +19,7 @@ Core idea (spec §1): **don't make the student know what information is required
 | Read `src/generated/prisma/**` | It's generated and huge. Types come from imports. |
 | Read `prisma/migrations/**` SQL to learn the schema | Read `prisma/schema.prisma` |
 | Read all 13 files in `src/lib/engine/schemas/` | `grep` for the slot key or category key. Shared slots (scope/impact/duration/recurring/location/details/person-at-risk/health-impact) live in `schemas/shared.ts` — check there before adding one. |
-| Pipe `seed-demo.ts` output through context | Check with a single SQL `count` |
+| Pipe a gate script's full output through context | Run it and read the tail — every gate prints its failures last and exits non-zero |
 | Re-derive a settled decision | It's in `plan.MD` §1 or §8 with the reasoning |
 
 Prefer `grep`/`rg` over reading whole files. When a task spans many files, delegate the sweep and keep the conclusion.
@@ -28,10 +29,10 @@ Prefer `grep`/`rg` over reading whole files. When a task spans many files, deleg
 ```bash
 docker compose up -d        # Postgres + Adminer
 npm run dev                 # app        → :3000
-npm run worker              # node-cron: SLA scan, escalation, recurrence   (Layer 8)
+npm run worker              # node-cron: SLA sweep every minute, recurrence scan nightly
+npm run worker -- --once    # one sweep of each job, then exit — what the gates use
 npm run db:migrate          # prisma migrate dev
 npm run db:seed             # departments, locations, routing rules, SLA profiles, demo users
-npm run db:seed:demo        # ~800 historical complaints (needed for analytics) (Layer 10)
 npm run db:studio
 npm test                    # vitest — the layer gates
 
@@ -46,6 +47,24 @@ GROQ_API_KEY= npx tsx scripts/layer5-nokey.ts   # the Layer 5 gate — isolates 
 GROQ_API_KEY= npx tsx scripts/layer6-nokey.ts   # the Layer 6 gate — full §19 path + the incident-wide action
 ./scripts/layer6-gate.sh              # the same over the API, plus the four refusals (needs npm run dev)
 npx tsx scripts/layer6-backfill.ts    # one-off: give pre-Layer-6 complaints a lifecycle (idempotent)
+
+GROQ_API_KEY= npx tsx scripts/layer8-nokey.ts    # §22's ladder: due dates → manager → admin → flagged
+./scripts/layer8-gate.sh              # the same over the API, driven by the demo clock (needs npm run dev)
+
+GROQ_API_KEY= npx tsx scripts/layer9-nokey.ts    # §23/§24 both ways: declined then confirmed, rated once
+./scripts/layer9-gate.sh              # the same over the API, plus the five refusals (needs npm run dev)
+
+GROQ_API_KEY= npx tsx scripts/layer10-nokey.ts   # recounts every aggregate; drives §27→§30 over a temp trend
+./scripts/layer10-gate.sh             # role-scoped dashboards, page-vs-API agreement (needs npm run dev)
+```
+
+Demo the SLA ladder without waiting (dev only, admin only):
+
+```bash
+# make CMP-0042 older than its deadlines and run the sweep in one call
+curl -sS -b jar -X POST localhost:3000/api/dev/advance-clock \
+  -H 'content-type: application/json' -d '{"code":"CMP-0042","minutes":180,"scan":true}'
+curl -sS -b jar -X POST localhost:3000/api/dev/sla-scan     # the sweep on its own
 ```
 
 Ports: app **3000** · Postgres **5433** (not 5432 — avoids clashing with a local instance) · Adminer **8080**
@@ -58,8 +77,9 @@ Demo logins (all `password123`): `student@campus.edu` · `staff@campus.edu` (IT)
 
 ```
 src/app/
-  login/  report/  complaints/[id]/  queue/  incidents/[id]/  dashboard/
-  api/{auth,drafts,complaints,incidents,analytics,uploads,dev}/   # Route Handlers
+  login/  report/  complaints/[id]/  queue/  incidents/[id]/
+  dashboard/                 # one route, two views: campus (§31) or department (§32) by role
+  api/{auth,drafts,complaints,incidents,analytics,dev}/   # Route Handlers
 src/lib/
   db.ts                      # PrismaClient + PrismaPg adapter
   auth/                      # jwt, session, role guards
@@ -99,11 +119,25 @@ src/lib/
     stepper.ts                 # pure: §20's tracker — status + stamps → steps
     timeline.ts                # pure: event → headline/detail; statusStamps()
     transition.ts              # the ONE writer of Complaint.status + its events
-  queue/rank.ts                # pure: §21 ordering, null-safe on Layer 8's due dates
-  sla/        due dates, breach detection, escalation ladder
-  analytics/  raw SQL aggregations, recurring detection, health score
+  queue/rank.ts                # pure: §21 ordering + slaRisk(), null-safe on missing due dates
+  sla/
+    due.ts                     # pure: profile + band + start → the two deadlines
+    breach.ts                  # pure: §22's ladder — what is late, which rung, who it goes to
+    service.ts                 # the impure half: stamps due dates, runs the escalation sweep
+    dev-clock.ts               # dev only: ages a complaint so a breach can be demoed
+  feedback/
+    satisfaction.ts            # pure: rating validity, averages, the 0..1 form §34 wants
+    service.ts                 # §23 confirm/reject + §24 rating (the routes are thin over this)
+  analytics/
+    recurring.ts               # pure: §27 growth detection + §30 suggestions
+    heatmap.ts                 # pure: §28 density → High/Medium/Low, relative to the busiest
+    health.ts                  # pure: §34's formula, returning its terms
+    format.ts                  # pure: how a figure is spoken — "—" not "0%"
+    sql.ts                     # every $queryRaw aggregation (the designated impure module)
+    service.ts                 # composes both dashboards; the pages and the API share it
+src/components/charts.tsx      # server-rendered SVG/CSS charts, no client JS
 src/proxy.ts                 # Next 16 renamed middleware → proxy
-src/worker/index.ts
+src/worker/index.ts          # node-cron: SLA sweep (§22) + nightly recurrence scan (§30)
 tests/                       # mirrors src/lib paths
 ```
 
@@ -137,10 +171,19 @@ tests/                       # mirrors src/lib paths
 - **Every complaint has exactly one incident.** Size-1 incidents are hidden in the UI (`isSharedIncident()`). No nullable-incident branching anywhere. A merge that empties an incident deletes it — an incident with no members is a leftover, not a record.
 - **`affectedCount` is distinct *reporters*, not complaints.** §18 says "47 students have reported this issue"; one student filing twice is one affected student. Always recompute it with `recountIncident()` rather than incrementing.
 - **Dedup escalates the incident, never the member.** Linking must not touch a complaint's stored band — the student agreed to that band (§12). Scale (5 → +1, 20 → +2) moves `Incident.priority` only.
+- **`transition()` owns the SLA clock as well as the stamps.** Entering ASSIGNED (re)starts both due dates from the department's `SlaProfile`; ACKNOWLEDGED/IN_PROGRESS only fill a gap; REOPENED clears the due dates, `respondedAt` and `escalationLevel`, because §23's reopen is a fresh promise on a second attempt. Never stamp a due date anywhere else.
+- **The escalation sweep only ever moves a complaint *up* §22's ladder.** `escalationLevel` is the record of the rung reached, and that is what makes the once-a-minute cron, the dev endpoint and the gate all safe to run against the same complaint. A rung is walked only when *its own* breach is true (`escalationPlan`), so a complaint answered on time never gets a "nobody responded" event on its way to the admin. `escalationLevel >= 3` **is** §22's "flagged" — do not add a column for it.
+- **`sla/due.ts` and `sla/breach.ts` stay pure; `sla/service.ts` owns the Prisma** — the same split as `dedup/`. A threshold or a ladder rung that lives in `service.ts` cannot be unit-tested, which is the whole point of Layer 8's gate being a pure test plus one script.
+- **"Late" is defined twice and must agree.** `sla/breach.ts` decides it per row (the escalation ladder, the badges); the `BREACHED` fragment in `analytics/sql.ts` decides it in aggregate (SLA compliance, health). `scripts/layer10-nokey.ts` recounts one against the other — if you change either definition, change both and rerun that gate.
+- **§23 and §24 belong to the reporter.** `feedback/service.ts` compares against `reporterId`, not a role: an admin can *see* a complaint without being the person it happened to. Staff are also not offered a "Close" button on a RESOLVED complaint, even though the table permits it — legality and whose decision it is are different questions. One `Feedback` row per complaint, or the campus average becomes a click count.
+- **`analytics/` is pure except `sql.ts`.** `recurring.ts`, `heatmap.ts`, `health.ts` and `format.ts` take rows and return decisions; `sql.ts` holds every `$queryRaw`; `service.ts` composes them and is the **only** thing the pages and `/api/analytics/overview` call — a number on a dashboard must be a number the API can be asked for.
+- **§34's score is never returned bare.** `healthScore()` returns five signed terms with the measurement behind each, and every surface prints them. Same rule as §14's priority reasons.
+- **§27 needs a baseline, not just growth.** The detector requires sustained volume, a live latest month, *and* either a non-zero first month or three active months. Real data broke this: with all history inside one month it reported "up 5200% since March" against months that predate the system. Where there is no baseline the signal says "up from none" and `hasBaseline` is false — never format `growthRate` as a percentage without checking it.
+- **Charts plot one series and never rely on colour alone.** `components/charts.tsx` is server-rendered CSS/SVG with no client JS: one blue for magnitude, the four reserved status colours only for states, every band printed as a word beside its swatch, and a `title` on every mark. Two of the three status steps are below 3:1 on white — the word is what carries the meaning.
 - **`dedup/score.ts` stays pure; `dedup/candidates.ts` owns the SQL.** The scorer takes `textSimilarity` as a number so every weight and threshold is a unit test. Candidates are drawn by category + window + open incident — **never** by signature equality, because an `UNKNOWN` scope bucket has to act as a wildcard.
 - **A gate that pins a dedup band must pick a sentence the *rules* extractor reads.** "keeps disconnecting" has no keyword hint, so that case only lands on the right subcategory with an API key — which makes the band it asserts accidental. Check the sentence against `extractFromText` before relying on it.
 - **`pg_trgm` similarity requires `$queryRaw`** — Prisma has no native trigram support.
-- **The domain layer stays pure.** `engine/`, `dedup/`, `sla/`, `analytics/` (except its SQL module) must not import Prisma or call `fetch`. Data in → decisions out. This is the whole reason the layer gates can be unit tests.
+- **The domain layer stays pure.** `engine/`, `dedup/`, `sla/`, `feedback/` and `analytics/` must not import Prisma or call `fetch` — **except** each area's one designated impure module: `dedup/candidates.ts`, `sla/service.ts`, `feedback/service.ts`, `analytics/sql.ts` (+ `analytics/service.ts`, which only composes). Data in → decisions out. This is the whole reason the layer gates can be unit tests.
 - **Do not start a layer until the previous layer's gate passes.** Gates are in `plan.MD` §7.
 
 ## 6. Conventions

@@ -7,6 +7,19 @@
   --muted: #667085;
   --border: #e4e7ec;
   --accent: #2563eb;
+
+  /* Chart roles (Layer 10). Every dashboard chart here plots ONE series — a
+     magnitude — so there is no categorical palette to cycle: one blue, stepped
+     light→dark, plus the four reserved status colours. Status is only ever used
+     for a state (§28's High/Medium/Low, §34's penalties), always beside a word,
+     never as the only carrier of meaning. */
+  --viz-bar: #2a78d6;
+  --viz-bar-soft: #9ec5f4;
+  --viz-track: #eef1f5;
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
 }
 
 @theme inline {
