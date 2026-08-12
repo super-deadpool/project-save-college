@@ -1,0 +1,86 @@
+import type { CategorySchema } from '../types';
+import { detailsSlot, healthImpactSlot, locationSlot, recurringSlot, scopeSlot } from './shared';
+
+/** Spec §5 — hostel, meal, date, type of issue, whether it recurs. */
+export const hostelFoodSchema: CategorySchema = {
+  key: 'HOSTEL_FOOD',
+  label: 'Hostel food',
+  description: 'Mess food quality, hygiene, quantity or menu problems',
+  keywords: [
+    'mess',
+    'mess food',
+    'food',
+    'breakfast',
+    'lunch',
+    'dinner',
+    'meal',
+    'roti',
+    'rice',
+    'dal',
+    'curry',
+    'stale',
+    'undercooked',
+    'raw',
+    'insect in food',
+    'menu',
+  ],
+  subcategorySlot: 'problem_type',
+  dedupWindowHours: 12,
+  slots: [
+    {
+      key: 'problem_type',
+      question: 'What was wrong with the food?',
+      type: 'enum',
+      importance: 'REQUIRED',
+      infoGain: 0.9,
+      options: [
+        { value: 'STALE', label: 'Stale or spoiled food', hazard: 'FOOD_ILLNESS', hints: ['stale', 'spoiled', 'smelled bad', 'rotten', 'sour'] },
+        { value: 'UNDERCOOKED', label: 'Undercooked or raw', hints: ['undercooked', 'uncooked', 'raw', 'half cooked'] },
+        { value: 'FOREIGN_OBJECT', label: 'Something in the food', hazard: 'FOOD_ILLNESS', hints: ['insect in food', 'worm', 'hair in', 'stone in', 'plastic in'] },
+        { value: 'HYGIENE', label: 'Unhygienic serving or utensils', hints: ['unhygienic', 'dirty plates', 'dirty utensils', 'flies'] },
+        { value: 'QUANTITY', label: 'Not enough food', hints: ['not enough', 'ran out', 'insufficient', 'quantity'] },
+        { value: 'TASTE', label: 'Badly cooked / tasteless', hints: ['tasteless', 'too spicy', 'no salt', 'badly cooked'] },
+        { value: 'MENU', label: 'Menu not followed', hints: ['menu not followed', 'different from menu', 'same food'] },
+        { value: 'TIMING', label: 'Mess timings not honoured', hints: ['closed early', 'served late', 'timing'] },
+      ],
+      extractHints: ['mess', 'food'],
+      unsureDefault: 'TASTE',
+    },
+    locationSlot({
+      question: 'Which mess or hostel was this?',
+      placeholder: 'e.g. Boys Hostel A Mess',
+    }),
+    healthImpactSlot(),
+    {
+      key: 'meal',
+      question: 'Which meal was it?',
+      type: 'enum',
+      importance: 'RECOMMENDED',
+      infoGain: 0.8,
+      options: [
+        { value: 'BREAKFAST', label: 'Breakfast', hints: ['breakfast', 'morning meal'] },
+        { value: 'LUNCH', label: 'Lunch', hints: ['lunch', 'afternoon meal'] },
+        { value: 'SNACKS', label: 'Evening snacks', hints: ['snacks', 'evening snack', 'tea time'] },
+        { value: 'DINNER', label: 'Dinner', hints: ['dinner', 'night meal', 'supper'] },
+      ],
+    },
+    {
+      key: 'meal_date',
+      question: 'Which day was this?',
+      type: 'date',
+      importance: 'RECOMMENDED',
+      infoGain: 0.6,
+      placeholder: 'e.g. today, or 2026-08-11',
+    },
+    scopeSlot({
+      question: 'Did this affect others too?',
+      options: [
+        { value: 'ONLY_ME', label: 'Only my plate', hints: ['only mine', 'just mine', 'only my plate'] },
+        { value: 'FEW', label: 'A few of us', hints: ['few of us', 'some of us', 'couple of us'] },
+        { value: 'MANY', label: 'Most people eating', hints: ['everyone', 'all of us', 'most people', 'whole mess'] },
+      ],
+    }),
+    recurringSlot({ question: 'Is this a recurring problem in this mess?', infoGain: 0.7 }),
+    detailsSlot({ question: 'Anything else about the food or serving?' }),
+  ],
+};

@@ -1,0 +1,389 @@
+// Smart Complaint Management System — data model (plan.MD §6)
+//
+// Prisma 7: `prisma-client` generator (not prisma-client-js), explicit output,
+// and a mandatory driver adapter (see src/lib/db.ts).
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------- enums
+
+enum Role {
+  STUDENT
+  STAFF
+  DEPT_MANAGER
+  ADMIN
+}
+
+enum LocationType {
+  CAMPUS
+  ACADEMIC
+  HOSTEL
+  LIBRARY
+  CANTEEN
+  LAB
+  TRANSPORT
+  OUTDOOR
+  ADMIN_BLOCK
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum DraftStatus {
+  DRAFT
+  SUBMITTED
+  ABANDONED
+}
+
+enum ComplaintStatus {
+  SUBMITTED
+  ANALYZING
+  ASSIGNED
+  ACKNOWLEDGED
+  IN_PROGRESS
+  WAITING_FOR_STUDENT
+  RESOLVED
+  CLOSED
+  REOPENED
+  REJECTED
+  DUPLICATE
+}
+
+enum IncidentStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+enum EventType {
+  CREATED
+  STATUS_CHANGED
+  ASSIGNED
+  COMMENT
+  PROGRESS_UPDATE
+  INFO_REQUESTED
+  INFO_PROVIDED
+  ESCALATED
+  SLA_BREACHED
+  LINKED_TO_INCIDENT
+  DUPLICATE_SUGGESTED
+  RESOLUTION_CONFIRMED
+  RESOLUTION_REJECTED
+  FEEDBACK_SUBMITTED
+  ATTACHMENT_ADDED
+}
+
+enum AttachmentKind {
+  PHOTO
+  VIDEO
+  AUDIO
+  DOC
+}
+
+enum DedupVerdict {
+  NEW
+  AUTO_LINKED
+  SUGGESTED
+}
+
+// ---------------------------------------------------------------- core
+
+model User {
+  id           String  @id @default(cuid())
+  email        String  @unique
+  name         String
+  passwordHash String
+  role         Role    @default(STUDENT)
+  departmentId String?
+  // Student-facing metadata (hostel block, roll number) — handy for routing hints.
+  hostelBlock  String?
+  rollNumber   String?
+  isActive     Boolean @default(true)
+
+  department        Department?      @relation(fields: [departmentId], references: [id])
+  complaints        Complaint[]      @relation("ComplaintReporter")
+  assignedComplaint Complaint[]      @relation("ComplaintAssignee")
+  drafts            ComplaintDraft[]
+  events            ComplaintEvent[]
+  feedback          Feedback[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([role])
+  @@index([departmentId])
+}
+
+model Department {
+  id           String  @id @default(cuid())
+  code         String  @unique
+  name         String
+  description  String?
+  slaProfileId String?
+
+  slaProfile   SlaProfile?   @relation(fields: [slaProfileId], references: [id])
+  users        User[]
+  complaints   Complaint[]
+  routingRules RoutingRule[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Location {
+  id          String       @id @default(cuid())
+  code        String       @unique
+  name        String
+  type        LocationType
+  // 0..1 — feeds the priority rubric's locationCriticality term (plan.MD §4).
+  criticality Float        @default(0.5)
+  parentId    String?
+
+  parent   Location?  @relation("LocationTree", fields: [parentId], references: [id])
+  children Location[] @relation("LocationTree")
+
+  complaints   Complaint[]
+  incidents    Incident[]
+  routingRules RoutingRule[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([parentId])
+  @@index([type])
+}
+
+// ---------------------------------------------------------------- conversation
+
+model ComplaintDraft {
+  id          String      @id @default(cuid())
+  userId      String
+  rawText     String      @default("")
+  categoryKey String?
+  // Record<slotKey, SlotValue> — see src/lib/engine/types.ts
+  slots       Json        @default("{}")
+  askedSlots  String[]    @default([])
+  // Turn[] — the transcript, so refresh is safe and answers stay editable.
+  turns       Json        @default("[]")
+  status      DraftStatus @default(DRAFT)
+  isAnonymous Boolean     @default(false)
+  complaintId String?     @unique
+
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  complaint Complaint? @relation(fields: [complaintId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, status])
+}
+
+// ---------------------------------------------------------------- complaints
+
+model Complaint {
+  id             String  @id @default(cuid())
+  code           String  @unique
+  title          String
+  description    String
+  categoryKey    String
+  subcategoryKey String?
+  locationId     String?
+  reporterId     String
+  departmentId   String?
+  incidentId     String?
+  assigneeId     String?
+
+  // Record<slotKey, SlotValue>
+  slots           Json            @default("{}")
+  priority        Priority        @default(MEDIUM)
+  priorityScore   Int             @default(0)
+  // { label, weight, detail }[] — §14 requires the reason, never a bare band.
+  priorityReasons Json            @default("[]")
+  routingScore    Float           @default(0)
+  needsTriage     Boolean         @default(false)
+  status          ComplaintStatus @default(SUBMITTED)
+  isAnonymous     Boolean         @default(false)
+
+  // Dedup (plan.MD §5)
+  signature    String?
+  dedupVerdict DedupVerdict @default(NEW)
+  dedupScore   Float        @default(0)
+
+  // SLA (Layer 8)
+  responseDueAt   DateTime?
+  resolutionDueAt DateTime?
+  respondedAt     DateTime?
+  resolvedAt      DateTime?
+  closedAt        DateTime?
+  escalationLevel Int       @default(0)
+  reopenCount     Int       @default(0)
+
+  reporter    User             @relation("ComplaintReporter", fields: [reporterId], references: [id])
+  assignee    User?            @relation("ComplaintAssignee", fields: [assigneeId], references: [id])
+  department  Department?      @relation(fields: [departmentId], references: [id])
+  location    Location?        @relation(fields: [locationId], references: [id])
+  incident    Incident?        @relation(fields: [incidentId], references: [id])
+  events      ComplaintEvent[]
+  attachments Attachment[]
+  feedback    Feedback?
+  draft       ComplaintDraft?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, priority])
+  @@index([departmentId, status])
+  @@index([reporterId])
+  @@index([signature])
+  @@index([categoryKey, locationId])
+  @@index([createdAt])
+  // Trigram indexes backing dedup text similarity and Layer 11 search.
+  // Requires the pg_trgm extension — created in migrations/*_pg_trgm.
+  @@index([title(ops: raw("gin_trgm_ops"))], type: Gin)
+  @@index([description(ops: raw("gin_trgm_ops"))], type: Gin)
+}
+
+model Incident {
+  id            String         @id @default(cuid())
+  code          String         @unique
+  title         String
+  categoryKey   String
+  locationId    String?
+  priority      Priority       @default(MEDIUM)
+  status        IncidentStatus @default(OPEN)
+  affectedCount Int            @default(1)
+  signature     String?
+  resolvedAt    DateTime?
+
+  location   Location?   @relation(fields: [locationId], references: [id])
+  complaints Complaint[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, categoryKey])
+  @@index([signature])
+}
+
+model ComplaintEvent {
+  id          String    @id @default(cuid())
+  complaintId String
+  type        EventType
+  actorId     String?
+  message     String?
+  meta        Json      @default("{}")
+  // Events authored by staff that the student should not see (internal notes).
+  isInternal  Boolean   @default(false)
+
+  complaint   Complaint    @relation(fields: [complaintId], references: [id], onDelete: Cascade)
+  actor       User?        @relation(fields: [actorId], references: [id])
+  attachments Attachment[]
+
+  createdAt DateTime @default(now())
+
+  @@index([complaintId, createdAt])
+}
+
+model Attachment {
+  id          String         @id @default(cuid())
+  complaintId String?
+  eventId     String?
+  kind        AttachmentKind
+  storageKey  String
+  fileName    String
+  mimeType    String
+  sizeBytes   Int
+  uploadedById String?
+
+  complaint Complaint?      @relation(fields: [complaintId], references: [id], onDelete: Cascade)
+  event     ComplaintEvent? @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@index([complaintId])
+}
+
+model Feedback {
+  id                  String  @id @default(cuid())
+  complaintId         String  @unique
+  userId              String
+  rating              Int
+  comment             String?
+  resolutionConfirmed Boolean @default(true)
+
+  complaint Complaint @relation(fields: [complaintId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id])
+
+  createdAt DateTime @default(now())
+}
+
+// ---------------------------------------------------------------- config tables
+
+model SlaProfile {
+  id   String @id @default(cuid())
+  code String @unique
+  name String
+
+  // minutes, per priority band
+  responseCritical   Int @default(15)
+  resolutionCritical Int @default(240)
+  responseHigh       Int @default(60)
+  resolutionHigh     Int @default(1440)
+  responseMedium     Int @default(240)
+  resolutionMedium   Int @default(4320)
+  responseLow        Int @default(1440)
+  resolutionLow      Int @default(10080)
+
+  departments Department[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model RoutingRule {
+  id             String        @id @default(cuid())
+  categoryKey    String
+  subcategoryKey String?
+  locationType   LocationType?
+  locationId     String?
+  departmentId   String
+  // Higher wins. Location override > locationType match > category default.
+  specificity    Int           @default(0)
+  confidence     Float         @default(0.9)
+
+  department Department @relation(fields: [departmentId], references: [id])
+  location   Location?  @relation(fields: [locationId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@index([categoryKey, subcategoryKey])
+}
+
+model RecurringSignal {
+  id             String   @id @default(cuid())
+  categoryKey    String
+  locationId     String?
+  windowStart    DateTime
+  windowEnd      DateTime
+  occurrences    Int
+  growthRate     Float
+  suggestion     String?
+  narrative      String?
+  acknowledgedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([categoryKey, locationId])
+}
