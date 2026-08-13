@@ -353,6 +353,11 @@ Signature computation, candidate query (open incidents, same category/location f
 
 **One thing worth recording for later layers:** the near-miss case in the gate originally used "the wifi keeps disconnecting", which lands on the right subcategory *only with an API key* — no keyword hint matches "disconnecting". The case now uses wording the rules extractor reads on its own, so the band it asserts is provable rather than incidental. Any future gate that pins a dedup band has to pick its sentence the same way.
 
+**`scripts/layer5-gate.sh` is flaky, and it can also pass for the wrong reason** (found 13 Aug 2026 while re-running every gate after Layer 10; the dedup pipeline itself is untouched since this layer shipped). Two independent problems, both in the script rather than the system:
+
+1. **It runs with an API key, so §16's fourth student depends on LLM extraction.** That student names no scope and no building on purpose, so their complaint's subcategory — part of the graded signature — is whatever extraction returns that run. One run had all four in one incident; the next had the fourth on its own with a MEDIUM band. `GROQ_API_KEY= npx tsx scripts/layer5-nokey.ts` is the deterministic gate for §16 and it passes every time; treat it as the authoritative one.
+2. **It does not isolate its run, so a leftover open NETWORK incident can make it pass without proving anything.** On the re-run its four complaints joined an incident a previous script had left open, and `affectedCount` read 4 because of *that* run's reporters. `layer5-nokey.ts` closes stale open incidents first (`isolateRun()`), which is exactly why it is trustworthy — the shell gate needs the same treatment before its result means anything, and until then a green run should be confirmed against the no-key script.
+
 **Carried into Layer 6:** incident status is set to `OPEN` and never moves — propagation from member complaints is Layer 6's job, and `loadIncident` already derives everything the propagation will need. `IncidentStatus.RESOLVED/CLOSED` already changes the §36 message text.
 
 ### Layer 6 — Lifecycle & staff workflow

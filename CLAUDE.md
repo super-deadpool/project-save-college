@@ -43,6 +43,9 @@ GROQ_API_KEY= npx tsx scripts/layer4-nokey.ts   # the no-key run, through the se
 
 GROQ_API_KEY= npx tsx scripts/layer5-nokey.ts   # the Layer 5 gate — isolates its own history, asserts exact counts
 ./scripts/layer5-gate.sh              # §16 from four real logins + incident RBAC (needs npm run dev)
+                                      #   ⚠ flaky: §16's 4th student depends on LLM extraction, and it does not
+                                      #   isolate its run, so it can pass on a leftover incident. Trust the
+                                      #   no-key script above; see plan.MD, Layer 5.
 
 GROQ_API_KEY= npx tsx scripts/layer6-nokey.ts   # the Layer 6 gate — full §19 path + the incident-wide action
 ./scripts/layer6-gate.sh              # the same over the API, plus the four refusals (needs npm run dev)
@@ -207,14 +210,16 @@ Read this first, update it last. Mirrors `plan.MD`.
 | 4 | Classification, priority, routing, explainability | ✅ Gate passed |
 | 5 | Dedup & incidents | ✅ Gate passed |
 | 6 | Lifecycle & staff workflow | ✅ Gate passed |
-| 7 | Attachments & anonymous reporting | ⬜ Next |
-| 8 | SLA & escalation | ⬜ |
-| 9 | Resolution confirmation, reopen, feedback | ⬜ |
-| 10 | Analytics, dashboards, insights | ⬜ |
-| 11 | Search & discovery | ⬜ |
+| 7 | Attachments & anonymous reporting | ⬜ **Dropped** — additive, nothing depends on it |
+| 8 | SLA & escalation | ✅ Gate passed |
+| 9 | Resolution confirmation, reopen, feedback | ✅ Gate passed |
+| 10 | Analytics, dashboards, insights | ✅ Gate passed — **no demo seed**, see below |
+| 11 | Search & discovery | ⬜ Next |
 | 12 | AI insight narratives (notifications deferred) | ⬜ |
 
-**Carried into later layers:** the transition table already permits Layer 9's two student moves (`RESOLVED → CLOSED` and `RESOLVED → REOPENED`, the reopen needing a reason), so that layer adds screens and a `Feedback` row rather than new rules — `reopenCount` is already incremented and the stamps cleared on reopen. Layer 8 fills `responseDueAt`/`resolutionDueAt`, at which point the queue's SLA-at-risk bucket and its badges light up with no change to `queue/rank.ts`.
+**Where the sparse data bites.** With `seed-demo.ts` dropped, every complaint in the database was filed by a gate script, inside one month. The dashboards are correct but thin, and two things follow: §27's recurrence detector will report nothing in the running app (it refuses to call the start of the data a trend — see §5), and average resolution times are near zero because the gates resolve complaints seconds after filing them. Both are properties of the data, not of the code: `scripts/layer10-nokey.ts` recounts every aggregate against the row-level modules and drives §27 → §30 over a four-month trend it creates and deletes. If you want a populated walkthrough, seeding history is the missing piece — not fixing analytics.
+
+**Carried into Layer 11–12:** the search layer has what it needs — `pg_trgm` GIN indexes on `title`/`description` exist from Layer 0, and §38's "complaints that have exceeded their resolution time" is the `BREACHED` fragment in `analytics/sql.ts` used as a filter rather than a count. Layer 12's weekly summary should compute its numbers with the existing `analytics/sql.ts` functions and hand *only the prose* to Groq, with `RecurringSignal.narrative` as the no-key fallback it already writes. Notifications (§35/§36) stay deferred; the `ESCALATED` events already carry the recipient's id and name in `meta`, so delivery is the only missing half.
 
 - auto compact at 60% capacity and after 3 times of auto compacting in a row . make the summary of the session to give to new session
 - Do not build until you have 95% confidence of what you are building. To get the confidence ask me for questions.
